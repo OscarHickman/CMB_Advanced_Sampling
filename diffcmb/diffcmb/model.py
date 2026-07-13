@@ -467,7 +467,11 @@ class CosmologyAdvancedSampling:
         if self.sph1 is None:
             self._ensure_tf_tensors()
         if not hasattr(self, "_compiled_psi_tf"):
-            use_jit = not getattr(self, "multi_device", False)
+            # The matrix-free ducc0 SHT (sht_ducc.masked_synthesis_tf) wraps a
+            # non-TF call in tf.py_function, which XLA cannot compile through
+            # (EagerPyFunc has no XLA_CPU_JIT kernel) -- same reason
+            # sample_alm_cg's autodiff closures use jit_compile=False.
+            use_jit = not getattr(self, "multi_device", False) and not getattr(self, "use_matrixfree_sht", False)
             print(f"Compiling psi_tf with jit_compile={use_jit}...")
             self._compiled_psi_tf = tf.function(self._psi_tf_raw, jit_compile=use_jit)
         return self._compiled_psi_tf(_params)
