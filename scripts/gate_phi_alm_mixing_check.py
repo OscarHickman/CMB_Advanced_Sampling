@@ -13,8 +13,9 @@ synthetic lensed sky with known (alm_true, phi_true) at a cheap lmax.
 
 Method
 ------
-1. Build a small dense-SHT model (Block 3 currently requires model.sph_parts,
-   i.e. the dense SHT path -- matrix-free is Block-2-only so far).
+1. Build a small dense-SHT model (this gate predates the matrix-free port of
+   Block 3 -- lensing.py's psi_lensed/lens_map_tf now also support
+   use_matrixfree_sht=True, see ROADMAP.md Section 1 and lensing.py).
 2. Draw alm_true ~ N(0, C_l^TT) and phi_true ~ N(0, C_l^phiphi) from CAMB
    spectra at the model's fixed LCDM cosmology (power.py's parameters).
 3. Lens alm_true by phi_true through the model's own forward operator

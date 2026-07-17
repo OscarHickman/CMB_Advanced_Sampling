@@ -592,6 +592,11 @@ def lens_map_phi_diff_tf(
             T_lensed = T_lensed + weights_tf[k] * tf.gather(T_map, neighbors_tf[k])
 
         def backward(upstream):
+            # A downstream tf.gather (e.g. the matrix-free path's masked-
+            # likelihood restriction of T_lensed) makes TF's autodiff hand
+            # this an IndexedSlices rather than a dense tensor; _backward_np
+            # calls .numpy() directly, which IndexedSlices doesn't support.
+            upstream = tf.convert_to_tensor(upstream)
             g_T, g_phi = tf.py_function(
                 func=_backward_np,
                 inp=[upstream, neighbors_tf, weights_tf, dT_dtheta_tf, dT_dphi_tf],
@@ -632,30 +637,39 @@ def lens_map_tf(model, alm_tf: "tf.Tensor", phi_alm_np: np.ndarray):
         raise ImportError("healpy is required for lens_map_tf")
 
     from .alm_utils import splittosingularalm_tf
-    from .model import matvec_on_device
 
     lmax = model.lmax
     nside = model.NSIDE
     n_real = lmax * (lmax + 1) // 2 - 3
 
-    # alm → unlensed map on unmasked pixels via Y matrix
     _real_p = alm_tf[:n_real]
     _imag_p = alm_tf[n_real:]
     _a = splittosingularalm_tf(_real_p, _imag_p, lmax)
-    _a_c = model.alm_weights * tf.cast(_a, model.dtype)
 
-    T_parts = []
-    for sph_p in model.sph_parts:
-        _Ya = 2.0 * tf.math.real(matvec_on_device(sph_p, _a_c))
-        T_parts.append(tf.cast(_Ya, tf.float64))
-    T_unlensed_unmasked = tf.concat(T_parts, axis=0)  # (n_unmasked,)
+    if getattr(model, "use_matrixfree_sht", False):
+        # alm → full-sky unlensed map directly (ducc0 synthesizes all Npix
+        # pixels; no dense Y matrix, no scatter-from-unmasked step needed —
+        # the mask is applied to the likelihood post-lensing, not here).
+        from .sht_ducc import full_synthesis_tf
 
-    # Scatter unmasked pixels onto full sphere for bilinear interpolation
-    npix_full = 12 * nside * nside
-    unmasked_idx_tf = tf.constant(model.unmasked_idx, dtype=tf.int32)
-    T_full = tf.math.unsorted_segment_sum(
-        T_unlensed_unmasked, unmasked_idx_tf, num_segments=npix_full
-    )
+        _a_ho = tf.gather(_a, model._alm_mo_to_ho_idx)
+        T_full = full_synthesis_tf(tf.cast(_a_ho, tf.complex128), model._sht)
+    else:
+        from .model import matvec_on_device
+
+        _a_c = model.alm_weights * tf.cast(_a, model.dtype)
+        T_parts = []
+        for sph_p in model.sph_parts:
+            _Ya = 2.0 * tf.math.real(matvec_on_device(sph_p, _a_c))
+            T_parts.append(tf.cast(_Ya, tf.float64))
+        T_unlensed_unmasked = tf.concat(T_parts, axis=0)  # (n_unmasked,)
+
+        # Scatter unmasked pixels onto full sphere for bilinear interpolation
+        npix_full = 12 * nside * nside
+        unmasked_idx_tf = tf.constant(model.unmasked_idx, dtype=tf.int32)
+        T_full = tf.math.unsorted_segment_sum(
+            T_unlensed_unmasked, unmasked_idx_tf, num_segments=npix_full
+        )
 
     neighbors, weights, _, _ = precompute_lensing(
         phi_alm_np, nside, lmax, model.unmasked_idx
@@ -696,7 +710,6 @@ def psi_lensed(
         raise ImportError("tensorflow is required for psi_lensed")
 
     from .alm_utils import splittosingularalm_tf
-    from .model import matvec_on_device
 
     lmax = model.lmax
     nside = model.NSIDE
@@ -713,19 +726,27 @@ def psi_lensed(
 
     # alm → full-sphere unlensed map
     _a = splittosingularalm_tf(real_alm, imag_alm, lmax)
-    _a_c = model.alm_weights * tf.cast(_a, model.dtype)
 
-    T_parts = []
-    for sph_p in model.sph_parts:
-        _Ya = 2.0 * tf.math.real(matvec_on_device(sph_p, _a_c))
-        T_parts.append(tf.cast(_Ya, tf.float64))
-    T_unlensed_unmasked = tf.concat(T_parts, axis=0)
+    if getattr(model, "use_matrixfree_sht", False):
+        from .sht_ducc import full_synthesis_tf
 
-    npix_full = 12 * nside * nside
-    unmasked_idx_tf = tf.constant(model.unmasked_idx, dtype=tf.int32)
-    T_full = tf.math.unsorted_segment_sum(
-        T_unlensed_unmasked, unmasked_idx_tf, num_segments=npix_full
-    )
+        _a_ho = tf.gather(_a, model._alm_mo_to_ho_idx)
+        T_full = full_synthesis_tf(tf.cast(_a_ho, tf.complex128), model._sht)
+    else:
+        from .model import matvec_on_device
+
+        _a_c = model.alm_weights * tf.cast(_a, model.dtype)
+        T_parts = []
+        for sph_p in model.sph_parts:
+            _Ya = 2.0 * tf.math.real(matvec_on_device(sph_p, _a_c))
+            T_parts.append(tf.cast(_Ya, tf.float64))
+        T_unlensed_unmasked = tf.concat(T_parts, axis=0)
+
+        npix_full = 12 * nside * nside
+        unmasked_idx_tf = tf.constant(model.unmasked_idx, dtype=tf.int32)
+        T_full = tf.math.unsorted_segment_sum(
+            T_unlensed_unmasked, unmasked_idx_tf, num_segments=npix_full
+        )
 
     # Lensed map — differentiable w.r.t. both T_full (→ alm) and phi_packed_tf
     T_lensed = lens_map_phi_diff_tf(
@@ -733,17 +754,23 @@ def psi_lensed(
     )
 
     # Lensed likelihood
-    psi_lik = tf.constant(0.0, dtype=tf.float64)
-    start = 0
-    for i, (map_p, ninv_p) in enumerate(zip(  # noqa: B905
-        model.prior_map_parts, model.Ninv_parts
-    )):
-        n = int(model.sph_parts[i].shape[0])
-        T_lensed_part = T_lensed[start : start + n]
-        psi_lik = psi_lik + 0.5 * tf.reduce_sum(
-            (map_p - T_lensed_part) ** 2 * ninv_p
+    if getattr(model, "use_matrixfree_sht", False):
+        T_lensed_masked = tf.gather(T_lensed, tf.constant(model.unmasked_idx, dtype=tf.int32))
+        psi_lik = 0.5 * tf.reduce_sum(
+            (model.prior_map_masked - T_lensed_masked) ** 2 * model.Ninv_masked
         )
-        start += n
+    else:
+        psi_lik = tf.constant(0.0, dtype=tf.float64)
+        start = 0
+        for i, (map_p, ninv_p) in enumerate(zip(  # noqa: B905
+            model.prior_map_parts, model.Ninv_parts
+        )):
+            n = int(model.sph_parts[i].shape[0])
+            T_lensed_part = T_lensed[start : start + n]
+            psi_lik = psi_lik + 0.5 * tf.reduce_sum(
+                (map_p - T_lensed_part) ** 2 * ninv_p
+            )
+            start += n
 
     # alm Gaussian prior  0.5 Σ_lm |a_lm|² / C_l
     _abs_a2 = tf.cast(tf.math.abs(_a), tf.float32) ** 2

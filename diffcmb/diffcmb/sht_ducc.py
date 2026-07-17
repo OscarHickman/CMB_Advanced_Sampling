@@ -110,6 +110,43 @@ class HealpixSHT:
         return self.adjoint_synthesis_full(map_full)
 
 
+def full_synthesis_tf(alm_ho_tf, sht: HealpixSHT):
+    """tf.custom_gradient wrapping HealpixSHT.synthesis_full (all Npix pixels).
+
+    Same convention as `masked_synthesis_tf`, but returns/accepts the full
+    sky rather than restricting to `sht.unmasked_idx` — needed by the
+    lensing operator (diffcmb/lensing.py), which must sample the unlensed
+    map at deflected positions that can lie outside the eventual mask (the
+    mask is applied post-lensing to the likelihood, not pre-lensing to the
+    synthesis).
+
+    alm_ho_tf: complex128 tensor, healpy-ordered, shape (sht.n_alm,), UNweighted.
+    Returns: float64 tensor, shape (sht.npix,).
+    """
+    _require_deps()
+
+    def _forward_np(alm_np):
+        return sht.synthesis_full(alm_np.numpy()).astype(np.float64)
+
+    def _backward_np(dy_np):
+        g = sht.adjoint_synthesis_full(dy_np.numpy().astype(np.float64))
+        return (sht._w * g).astype(np.complex128)
+
+    @tf.custom_gradient
+    def _fn(alm_tf):
+        map_tf = tf.py_function(func=_forward_np, inp=[alm_tf], Tout=tf.float64)
+        map_tf.set_shape([sht.npix])
+
+        def grad(dy):
+            grad_alm = tf.py_function(func=_backward_np, inp=[dy], Tout=tf.complex128)
+            grad_alm.set_shape([sht.n_alm])
+            return tf.cast(grad_alm, alm_tf.dtype)
+
+        return map_tf, grad
+
+    return _fn(alm_ho_tf)
+
+
 def masked_synthesis_tf(alm_ho_tf, sht: HealpixSHT):
     """tf.custom_gradient wrapping HealpixSHT.masked_synthesis.
 

@@ -487,3 +487,97 @@ def test_log_prob_phi_block_grad_vs_fd():
         g_auto[:8], g_fd[:8], rtol=0.02, atol=1e-5,
         err_msg="dlog_prob/dphi_alm autodiff vs FD mismatch in log_prob_phi_block"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7 — matrix-free ducc0 SHT path matches the dense-SHT reference (Phase 2
+#     gate: Block 3 was dense-SHT-only until this port; see ROADMAP.md
+#     Section 1 and the "dense-reference discipline" in Standing discipline)
+# ---------------------------------------------------------------------------
+
+def _make_matrixfree_model(lmax=LMAX, nside=NSIDE):
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from diffcmb import CosmologyAdvancedSampling
+    model = CosmologyAdvancedSampling(
+        _lmax=lmax, _NSIDE=nside, _noisesig=100.0,
+        data_mode="synthetic", dtype=tf.complex128, use_matrixfree_sht=True,
+    )
+    model._ensure_tf_tensors()
+    return model
+
+
+def _sync_prior_map(dense_model, mf_model, rng):
+    """Give both models the same random full-sky prior_map + masked/parts views."""
+    npix = dense_model.NPIX
+    shared_map = rng.standard_normal(npix)
+
+    dense_model.prior_map = shared_map
+    dense_model.prior_map_parts = [
+        tf.convert_to_tensor(shared_map[dense_model.unmasked_idx], dtype=tf.float64)
+    ]
+    mf_model.prior_map = shared_map
+    mf_model.prior_map_masked = tf.convert_to_tensor(
+        shared_map[mf_model.unmasked_idx], dtype=tf.float64
+    )
+
+
+@pytest.mark.skipif(not HAS_HEALPY or not HAS_TF, reason="healpy/tf not installed")
+def test_lens_map_tf_matrixfree_matches_dense():
+    """lens_map_tf: matrix-free ducc0 full-sky synthesis vs the dense Y-matrix
+    scatter-from-unmasked path, on a full-sky (no mask) model where the two
+    should agree to numerical precision."""
+    dense_model = _make_model()
+    mf_model = _make_matrixfree_model()
+    assert len(dense_model.unmasked_idx) == dense_model.NPIX, (
+        "test assumes a full-sky (unmasked) model so dense scatter-from-unmasked "
+        "and matrix-free full-sky synthesis cover identical pixels"
+    )
+
+    rng = np.random.default_rng(7)
+    alm_packed = _rand_alm_packed(LMAX, rng)
+    phi_hp = np.zeros(hp.Alm.getsize(LMAX - 1), dtype=np.complex128)  # zero phi
+
+    from diffcmb.lensing import lens_map_tf
+    T_dense = lens_map_tf(dense_model, tf.constant(alm_packed, tf.float64), phi_hp).numpy()
+    T_mf = lens_map_tf(mf_model, tf.constant(alm_packed, tf.float64), phi_hp).numpy()
+
+    np.testing.assert_allclose(T_mf, T_dense, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.skipif(not HAS_HEALPY or not HAS_TF, reason="healpy/tf not installed")
+def test_psi_lensed_matrixfree_matches_dense():
+    """psi_lensed: matrix-free vs dense-SHT give the same log-posterior value
+    and the same gradient w.r.t. alm/C_l, given identical alm/phi/data."""
+    dense_model = _make_model()
+    mf_model = _make_matrixfree_model()
+    assert len(dense_model.unmasked_idx) == dense_model.NPIX
+
+    rng = np.random.default_rng(11)
+    _sync_prior_map(dense_model, mf_model, rng)
+
+    lmax = LMAX
+    n_lncl = lmax - 2
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    params_np = np.zeros(n_lncl + n_real + n_imag)
+    params_np[:n_lncl] = 5.0
+    params_np[n_lncl:] = rng.standard_normal(n_real + n_imag) * 0.1
+    params_tf = tf.Variable(params_np, dtype=tf.float64)
+
+    phi_packed = _rand_phi_packed(lmax, rng, amplitude=1e-4)
+    phi_tf = tf.constant(phi_packed, dtype=tf.float64)
+
+    from diffcmb.lensing import psi_lensed
+
+    with tf.GradientTape() as tape:
+        val_dense = psi_lensed(dense_model, params_tf, phi_tf)
+    grad_dense = tape.gradient(val_dense, params_tf).numpy()
+
+    with tf.GradientTape() as tape:
+        val_mf = psi_lensed(mf_model, params_tf, phi_tf)
+    grad_mf = tape.gradient(val_mf, params_tf).numpy()
+
+    np.testing.assert_allclose(val_mf.numpy(), val_dense.numpy(), rtol=1e-6)
+    np.testing.assert_allclose(grad_mf, grad_dense, rtol=1e-5, atol=1e-6)
