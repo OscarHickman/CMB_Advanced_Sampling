@@ -732,8 +732,14 @@ def run_gibbs_chain(
     if alm_sampler in ('cg', 'messenger') and tf is None:
         raise ImportError("tensorflow is required for the CG/messenger samplers")
     sample_phi = cl_phiphi_full is not None
-    if sample_phi and alm_sampler != 'hmc':
-        raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc'")
+    if sample_phi and alm_sampler not in ('hmc', 'cg'):
+        raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc' or 'cg'")
+    # alm_sampler='cg' + sample_phi is the Phase 2 gate-2 exactness experiment
+    # (ROADMAP.md Section 1): Block 2 draws an exact Gaussian alm sample against
+    # the *unlensed* operator (sample_alm_cg's target is model._psi_tf_raw,
+    # which has no phi dependence) while Block 3 still applies the correct
+    # lensed likelihood (log_prob_phi_block) to phi. This is deliberately an
+    # approximation being tested for bias, not a claimed-correct sampler.
 
     rng = np.random.default_rng(seed)
     lmax = model.lmax
@@ -812,6 +818,17 @@ def run_gibbs_chain(
     cl_full = np.zeros(lmax)
     cl_full[2:] = np.exp(current_lncl)
 
+    if sample_phi:
+        from .lensing import log_prob_phi_block, psi_lensed
+
+        model._ensure_tf_tensors()
+        phi_mass_sqrt_np = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
+        phi_mass_sqrt_var = tf.Variable(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
+        phi_state_var = tf.Variable(
+            tf.constant(phi_current_np * phi_mass_sqrt_np, dtype=tf.float64)
+        )
+        phi_step_size_var = tf.Variable(phi_step_float, dtype=tf.float64)
+
     # --- Sampler-specific setup ---
     if alm_sampler == 'hmc':
         mass_sqrt_var = tf.Variable(tf.constant(mass_sqrt_np, dtype=tf.float64))
@@ -820,17 +837,6 @@ def run_gibbs_chain(
         )
         state_var = tf.Variable(tf.constant(current_alm_np * mass_sqrt_np, dtype=tf.float64))
         step_size_var = tf.Variable(step_float, dtype=tf.float64)
-
-        if sample_phi:
-            from .lensing import log_prob_phi_block, psi_lensed
-
-            model._ensure_tf_tensors()
-            phi_mass_sqrt_np = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
-            phi_mass_sqrt_var = tf.Variable(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
-            phi_state_var = tf.Variable(
-                tf.constant(phi_current_np * phi_mass_sqrt_np, dtype=tf.float64)
-            )
-            phi_step_size_var = tf.Variable(phi_step_float, dtype=tf.float64)
 
         def log_prob_whitened(u):
             alm = u / mass_sqrt_var
@@ -874,6 +880,26 @@ def run_gibbs_chain(
 
     else:  # 'cg' or 'messenger'
         model._ensure_tf_tensors()  # idempotent, no-op if already built
+
+        if sample_phi:  # 'cg' + Block 3 (gate-2 exactness experiment)
+            cg_lncl_var = tf.Variable(
+                tf.constant(np.concatenate([np.zeros(2), current_lncl]), dtype=tf.float64)
+            )
+            cg_alm_var = tf.Variable(tf.constant(current_alm_np, dtype=tf.float64))
+
+            def phi_log_prob_whitened(u):
+                phi_packed = u / phi_mass_sqrt_var
+                full_params = tf.concat([cg_lncl_var[2:], cg_alm_var], axis=0)
+                return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full)
+
+            phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
+                target_log_prob_fn=phi_log_prob_whitened,
+                step_size=phi_step_size_var,
+                num_leapfrog_steps=phi_n_lfs,
+            )
+
+            def phi_hmc_one_step(state, pkr):
+                return phi_hmc_kernel.one_step(state, pkr)
 
     recent = []
     resume_tag = "resuming, " if resuming else ""
@@ -933,6 +959,11 @@ def run_gibbs_chain(
                 np.concatenate([new_lncl, current_alm_np]), dtype=tf.float64
             )
             logp_val = float(-model._psi_tf_raw(full_p))
+            if sample_phi:
+                cg_lncl_var.assign(
+                    tf.constant(np.concatenate([np.zeros(2), new_lncl]), dtype=tf.float64)
+                )
+                cg_alm_var.assign(tf.constant(current_alm_np, dtype=tf.float64))
 
         else:  # 'messenger'
             current_alm_np = sample_alm_messenger(
