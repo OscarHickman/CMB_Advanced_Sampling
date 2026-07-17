@@ -35,7 +35,7 @@ Blocks: C_ℓ|alm exact inverse-Gamma (done); alm|C_ℓ,φ (the sampler above; n
 - [ ] Quantify what joint sampling buys over marginal methods (per-mode uncertainty propagation) — **as a figure, not a sentence**; this is the differentiator.
 - [ ] Optional Block 4: C_ℓ^φφ|φ exact inverse-Gamma (same structure as Block 1).
 
-## 2. The real-data run — Phase 2's science headline (⚠ REFRAMED 2026-07-13, see `literature_review_2026-07.md`)
+## 2. The real-data run — Phase 2's science headline (⚠ REFRAMED 2026-07-13, see `literature.md`)
 
 **The A_L anomaly is no longer live**: Planck PR4/NPIPE likelihoods (especially HiLLiPoP) report it much weakened/consistent with ΛCDM, and ACT DR6 lensing shows no excess. The honest pitch is now one of: (a) **the A_L post-mortem** — a joint (alm, C_ℓ, φ) posterior on Planck 2018 vs PR4 maps showing where in the joint space the anomaly lived and how it dissolves, the first fully-propagated-uncertainty account of its resolution; or (b) **internal-consistency machinery as the product** — the joint posterior as the principled lensing-consistency test for SO/LiteBIRD data, demonstrated on Planck. Phase 0 already runs on real Planck data, so marginal cost is small once Phase 2 validates.
 
@@ -65,3 +65,4 @@ Full TQU joint analysis; the reason curved-sky matters at all. After Phase 2 sub
 - **Claims hygiene**: every "first" carries scope qualifiers and nearest-prior-work citations (Millea+2020, MUSE, delensalot); re-check arXiv for curved-sky MUSE before each submission milestone.
 - **R-hat on C_ℓ alone is not convergence** — chains drifting together from the same start fool it; check the alm block and tail-ESS trends too (the messenger post-mortem's lesson).
 - On dine2/cosma8 reused nodes, scripts need a job-private `$TMPDIR` (autograph cache collision).
+- **`tf.gather` on a `tf.custom_gradient` output produces `IndexedSlices`, not a dense tensor**, as the upstream cotangent — any downstream `tf.py_function`/`.numpy()` call in that custom gradient's backward pass must `tf.convert_to_tensor()` it first (bit us in `apply_lensing_tf`'s backward when the matrix-free masked-likelihood path added a `tf.gather` on its output — see `lensing.py`, commit `19a7977`). Applies to any future custom-gradient op fed into `tf.gather`/`tf.boolean_mask`.
