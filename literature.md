@@ -1,6 +1,20 @@
 # Literature — DiffCMB
 
-*Annotated bibliography. Narrative assessment in `literature_review_2026-07.md`. Last updated 2026-07-13.*
+*Annotated bibliography, with narrative assessment folded in below. Last updated 2026-07-13.*
+
+## Narrative assessment (2026-07-13)
+
+**Verdict:** the novelty window is still open — no curved-sky MUSE and no curved-sky joint (alm, C_ℓ, φ) sampler has appeared — but the A_L science hook has weakened materially (anomaly largely resolved in Planck PR4/NPIPE and ACT DR6). **Reframe the real-data hook; lean harder on LiteBIRD delensing** (citations in the sections below).
+
+**⚠ The A_L hook — reframe, don't drop.** "Interrogate a live anomaly" is no longer an honest pitch. Two honest replacements:
+1. **Post-mortem with proper joint uncertainties**: joint (alm, C_ℓ, φ) posterior on Planck 2018 vs PR4 maps, showing where in parameter space the anomaly lived and how it dissolves — a fully-propagated-uncertainty account of a systematic's resolution.
+2. **Internal-consistency machinery as the product**: the same joint posterior as a principled internal lensing-consistency test for future data (SO, LiteBIRD) — sell the capability, demonstrated on Planck, rather than the anomaly.
+
+Either way, the beam/pixel-window/anisotropic-noise realism pre-condition stands unchanged.
+
+**Action items:**
+- [x] Reframe the A_L item in `ROADMAP.md`: post-mortem/consistency-machinery framing, not live-anomaly interrogation.
+- [ ] Cite arXiv:2507.22618 as the Phase-3 target-experiment reference in `ROADMAP.md`.
 
 ## The occupied cells of the 2×2 (full-sky × joint-sampling) — the claim's boundaries
 
