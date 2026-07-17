@@ -54,6 +54,7 @@ Full TQU joint analysis; the reason curved-sky matters at all. After Phase 2 sub
 - **Phase 2b — ΛCDM parameters from C_ℓ**: scientifically routine; a cheap robustness section *after* the Phase 2 paper submits.
 - **Phase 4 — lmax≥1000 scaling**: tuning, not rearchitecture, now the dense matrix is gone; profile only when Phase 2/3 need it.
 - **Phase 5 — non-Gaussian extensions** (fNL sampling, mask in-painting, learned priors, systematics blocks): each a separate paper after Phases 2–3.
+- **Lensed-operator exact Block-2 draw**: gate 2 (Section 1) failed because `sample_alm_cg` was calibrated against the *unlensed* operator `Y` while the data pass through `L(φ)∘Y` — the 652% bias is a calibration mismatch, not proof that no exact draw can work. A CG solve built from autodiff of `psi_lensed` (mirroring `_cg_grad_fn`'s use of `_psi_tf_raw`) would target the correct conditional exactly; the open question is whether the diagonal preconditioner still near-diagonalises `(L∘Y)^T N^{-1} (L∘Y)` well enough for fast PCG convergence, since lensing breaks the ℓ-diagonal structure the current preconditioner assumes. Not worth pursuing unless HMC-on-both-blocks (the current path) becomes a proven throughput bottleneck at lmax=300 — gate 1 passed MARGINAL, so no urgency.
 
 ## Standing discipline
 
