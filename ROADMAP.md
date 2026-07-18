@@ -45,7 +45,7 @@ Blocks: C_ℓ|alm exact inverse-Gamma (done); alm|C_ℓ,φ (the sampler above; n
 
 ## 3. Phase 3 — polarization / LiteBIRD delensing (the science paper)
 
-Full TQU joint analysis; the reason curved-sky matters at all. After Phase 2 submits.
+Full TQU joint analysis; the reason curved-sky matters at all. After Phase 2 submits. Target-experiment reference: the LiteBIRD lensing forecast (arXiv:2507.22618, July 2025) — its pipeline is QE/iterative, so a sampling-based delensing result fills a real gap, not a redundant one (see `literature.md`).
 
 - [ ] Spin-2 extension of alm utilities and the lensing operator (ducc0 spin-2 transforms — Phase 1.5 infrastructure carries over).
 - [ ] TQU joint likelihood with (TT, TE, EE, BB) block; C_ℓ^TE breaks inverse-Gamma conjugacy → 2×2 inverse-Wishart (BeyondPlanck structure) or HMC.

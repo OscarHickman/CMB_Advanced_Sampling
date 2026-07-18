@@ -1,6 +1,6 @@
 # Literature — DiffCMB
 
-*Annotated bibliography, with narrative assessment folded in below. Last updated 2026-07-13.*
+*Annotated bibliography, with narrative assessment folded in below. Narrative assessment dated 2026-07-13; action items updated 2026-07-18.*
 
 ## Narrative assessment (2026-07-13)
 
@@ -14,7 +14,7 @@ Either way, the beam/pixel-window/anisotropic-noise realism pre-condition stands
 
 **Action items:**
 - [x] Reframe the A_L item in `ROADMAP.md`: post-mortem/consistency-machinery framing, not live-anomaly interrogation.
-- [ ] Cite arXiv:2507.22618 as the Phase-3 target-experiment reference in `ROADMAP.md`.
+- [x] Cite arXiv:2507.22618 as the Phase-3 target-experiment reference in `ROADMAP.md` (2026-07-18, Section 3 intro).
 
 ## The occupied cells of the 2×2 (full-sky × joint-sampling) — the claim's boundaries
 
