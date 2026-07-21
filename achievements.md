@@ -1,6 +1,6 @@
 # Achievements — DiffCMB
 
-*Condensed record of completed and closed-out work. Full derivation/debugging detail is in git history (the pre-restructure `ROADMAP.md`). The forward plan lives in `ROADMAP.md`. Last updated 2026-07-18.*
+*Condensed record of completed and closed-out work. Full derivation/debugging detail is in git history (the pre-restructure `ROADMAP.md`). The forward plan lives in `ROADMAP.md`. Last updated 2026-07-21.*
 
 ## Validated foundations
 
