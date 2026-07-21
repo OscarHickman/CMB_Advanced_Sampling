@@ -646,6 +646,9 @@ def lens_map_tf(model, alm_tf: "tf.Tensor", phi_alm_np: np.ndarray):
     _imag_p = alm_tf[n_real:]
     _a = splittosingularalm_tf(_real_p, _imag_p, lmax)
 
+    if getattr(model, "beam_pixwin_per_l", None) is not None:
+        _a = _a * tf.cast(tf.gather(model.beam_pixwin_per_l, model.l_indices), _a.dtype)
+
     if getattr(model, "use_matrixfree_sht", False):
         # alm → full-sky unlensed map directly (ducc0 synthesizes all Npix
         # pixels; no dense Y matrix, no scatter-from-unmasked step needed —
@@ -726,6 +729,9 @@ def psi_lensed(
 
     # alm → full-sphere unlensed map
     _a = splittosingularalm_tf(real_alm, imag_alm, lmax)
+
+    if getattr(model, "beam_pixwin_per_l", None) is not None:
+        _a = _a * tf.cast(tf.gather(model.beam_pixwin_per_l, model.l_indices), _a.dtype)
 
     if getattr(model, "use_matrixfree_sht", False):
         from .sht_ducc import full_synthesis_tf
@@ -845,3 +851,107 @@ def log_prob_phi_block(
     )
 
     return -(neg_log_lik + phi_prior_neg_log)
+
+
+def estimate_phi_diag_fisher(
+    model,
+    params_tf: "tf.Tensor",
+    phi_packed_tf: "tf.Tensor",
+    lmax: int,
+    n_probes: int = 8,
+    rng=None,
+    eps: float = 1e-9,
+) -> np.ndarray:
+    """Coordinate-sampled diagonal estimate of psi_lensed's likelihood
+    curvature w.r.t. phi, averaged per L, for preconditioning the phi HMC
+    block (samplers.py::build_phi_posterior_mass_sqrt).
+
+    build_phi_prior_mass_sqrt only uses the prior curvature 1/cl_phiphi,
+    ignoring the lensing likelihood's curvature entirely -- this was found
+    to leave the phi HMC block barely mixing at production lmax (see
+    ROADMAP.md's "Simulation validation" entry): the whitened posterior
+    variance is highly non-uniform across L (tight where the likelihood
+    dominates at low L, prior-dominated and looser at high L), so a single
+    global step size settles at whatever the tightest dimension needs,
+    moving almost nowhere in the rest.
+
+    Method: for up to n_probes randomly-sampled packed-phi coordinates at
+    each L (all of them if the L has fewer than n_probes modes), estimate
+    the diagonal Hessian entry H_ii via a single-sided finite difference of
+    the already-validated *analytic* gradient of psi_lensed w.r.t. phi
+    (dpsi/dphi is validated against FD in test_psi_lensed_phi_grad_vs_fd),
+    perturbing only that one coordinate -- not double backprop through the
+    matrix-free SHT's tf.custom_gradient, which does not support
+    second-order autodiff and would risk resurrecting the exact FD-gradient
+    bug class already fixed once (achievements.md's "phi-block HMC
+    gradient"). Average the sampled H_ii within each L (fixed-L curvature
+    is physically near-isotropic across m).
+
+    An earlier version of this function used a true Hutchinson estimator
+    (a single joint random-direction probe per sample, cheaper in principle
+    -- O(n_probes) gradient evals total instead of O(n_probes * n_L_bins)).
+    It was abandoned: perturbing all packed-phi modes simultaneously drives
+    the aggregate perturbation across the same C0-but-not-C1
+    bilinear-interpolation-cell boundary documented in
+    test_psi_lensed_phi_grad_vs_fd's eps note, and even after rescaling eps
+    to avoid that, the off-diagonal coupling in this Hessian turned out
+    large enough that single-digit probe counts gave estimates off by
+    orders of magnitude. Per-coordinate sampling reuses the exact
+    single-index FD computation already validated to be stable and costs
+    more gradient evals, but is run once after a short HMC warm-up, not
+    every sweep.
+
+    eps=1e-9 matches the FD step used throughout tests/test_lensing.py's
+    phi-gradient checks -- a larger eps can cross a genuine (C0-but-not-C1)
+    bilinear-interpolation-cell boundary in the deflection field and make
+    the FD estimate itself unstable, not the analytic gradient wrong.
+
+    Returns
+    -------
+    diag_fisher_per_L : float64 array (lmax,), indexed by L (zero for L<2
+        and for any L with no positive sampled estimate -- FD Hessian
+        entries can be slightly negative from numerical noise for a
+        quantity that's only PSD in the true continuum limit; clipped to
+        >=0 before use as a mass-matrix addend).
+    """
+    if tf is None:
+        raise ImportError("tensorflow is required for estimate_phi_diag_fisher")
+    if rng is None:
+        rng = np.random.default_rng()
+
+    phi_np = (
+        phi_packed_tf.numpy() if hasattr(phi_packed_tf, "numpy") else np.asarray(phi_packed_tf)
+    )
+
+    def grad_at(phi_val: np.ndarray) -> np.ndarray:
+        phi_var = tf.Variable(phi_val, dtype=tf.float64)
+        with tf.GradientTape() as tape:
+            val = psi_lensed(model, params_tf, phi_var)
+        return tape.gradient(val, phi_var).numpy()
+
+    g0 = grad_at(phi_np)
+
+    from .samplers import _alm_index_lm
+
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    L_arr, _m_arr = _alm_index_lm(lmax, n_real, n_imag)
+
+    diag_fisher_per_L = np.zeros(lmax, dtype=np.float64)
+    for L in range(2, lmax):
+        idx_at_L = np.where(L_arr == L)[0]
+        if len(idx_at_L) == 0:
+            continue
+        sampled = (
+            idx_at_L
+            if len(idx_at_L) <= n_probes
+            else rng.choice(idx_at_L, size=n_probes, replace=False)
+        )
+        h_ii = np.empty(len(sampled), dtype=np.float64)
+        for k, i in enumerate(sampled):
+            phi_p = phi_np.copy()
+            phi_p[i] += eps
+            g1 = grad_at(phi_p)
+            h_ii[k] = (g1[i] - g0[i]) / eps
+        diag_fisher_per_L[L] = np.mean(np.maximum(h_ii, 0.0))
+    return diag_fisher_per_L

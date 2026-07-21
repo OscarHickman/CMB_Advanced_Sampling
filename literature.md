@@ -46,4 +46,4 @@ Either way, the beam/pixel-window/anisotropic-noise realism pre-condition stands
 
 ## Standing claims-hygiene rule
 
-Re-scan arXiv for curved-sky MUSE / curved-sky field-level lensing samplers **before every submission milestone** — the window is open (verified 2026-07-13) but finite.
+Re-scan arXiv for curved-sky MUSE / curved-sky field-level lensing samplers **before every submission milestone** — the window is open (verified 2026-07-13, re-verified 2026-07-18) but finite.

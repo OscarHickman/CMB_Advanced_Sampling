@@ -392,3 +392,119 @@ def test_gibbs_chain_messenger_moves_and_stays_bounded(small_masked_matrixfree_m
     assert np.all(np.isfinite(samples))
     assert np.abs(samples).max() < 1e3
     assert not np.allclose(samples[0], samples[-1])
+
+
+# ── phi posterior mass matrix (likelihood-curvature-aware preconditioner) ────
+
+def test_build_phi_posterior_mass_sqrt_matches_prior_only_when_fisher_zero():
+    """build_phi_posterior_mass_sqrt(..., diag_fisher_per_L=0) must reduce to
+    build_phi_prior_mass_sqrt exactly -- the new function is a strict
+    generalisation (adds likelihood curvature on top of the existing prior
+    curvature), so a zero Fisher term must be a no-op.
+    """
+    from diffcmb.samplers import (
+        build_phi_posterior_mass_sqrt,
+        build_phi_prior_mass_sqrt,
+    )
+
+    lmax = 10
+    rng = np.random.default_rng(0)
+    cl_phiphi_full = rng.uniform(1e-12, 1e-10, size=lmax)
+
+    prior_only = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
+    diag_fisher_per_L = np.zeros(lmax)
+    combined = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
+
+    np.testing.assert_allclose(combined, prior_only)
+
+
+def test_build_phi_posterior_mass_sqrt_increases_with_fisher_curvature():
+    """A nonzero diag_fisher_per_L must strictly increase the mass (i.e.
+    shrink the whitened step) for every mode at that L, matching
+    build_posterior_mass_sqrt's 1/C_l + Ninv_eff pattern for the alm block."""
+    from diffcmb.samplers import build_phi_posterior_mass_sqrt
+
+    lmax = 10
+    rng = np.random.default_rng(1)
+    cl_phiphi_full = rng.uniform(1e-12, 1e-10, size=lmax)
+    diag_fisher_per_L = np.zeros(lmax)
+    diag_fisher_per_L[5] = 1e11  # large curvature injected at L=5 only
+
+    zero_fisher = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, np.zeros(lmax))
+    with_fisher = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
+
+    assert np.all(with_fisher >= zero_fisher - 1e-30)
+    assert np.any(with_fisher > zero_fisher * 1.5)
+
+
+# ── run_gibbs_chain: phi_mass_matrix opt-in ('prior' default vs 'fisher') ────
+
+@skip_no_tfp
+def test_gibbs_chain_phi_mass_matrix_prior_default_unchanged(small_model, monkeypatch):
+    """phi_mass_matrix defaults to 'prior' -- estimate_phi_diag_fisher must
+    never be invoked in that mode (neither by omitting the parameter nor by
+    passing 'prior' explicitly), so the new parameter is a strict opt-in
+    with zero effect on existing callers.
+
+    Note: this codebase's HMC chain is not bit-for-bit reproducible across
+    separate run_gibbs_chain calls even with the same seed and model (TF's
+    global op-level nondeterminism, confirmed independent of this change),
+    so "unchanged" is checked by non-invocation of the new code path, not
+    by comparing two runs' output arrays.
+    """
+    import diffcmb.samplers as samplers_mod
+    from diffcmb import run_gibbs_chain
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("estimate_phi_diag_fisher must not be called when phi_mass_matrix='prior'")
+
+    monkeypatch.setattr(
+        "diffcmb.lensing.estimate_phi_diag_fisher", _boom, raising=False
+    )
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    kwargs = {
+        "n_samples": 5, "n_burnin": 5, "hmc_step_size": 0.01, "n_lfs": 5,
+        "cl_phiphi_full": cl_phiphi_full, "phi_hmc_step_size": 0.01, "phi_n_lfs": 5,
+        "seed": 42,
+    }
+
+    run_gibbs_chain(small_model, **kwargs)
+    run_gibbs_chain(small_model, phi_mass_matrix='prior', **kwargs)
+
+
+@skip_no_tfp
+def test_gibbs_chain_phi_mass_matrix_fisher_moves(small_model):
+    """phi_mass_matrix='fisher' recomputes the phi mass matrix mid-burn-in
+    using estimate_phi_diag_fisher and keeps running without breaking the
+    chain -- shapes/finiteness match the existing prior-only phi-block test."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+
+    samples, phi_samples, logp, accepts, final_step = run_gibbs_chain(
+        small_model,
+        n_samples=5,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        phi_mass_matrix='fisher',
+        phi_fisher_warmup_iter=2,
+        phi_fisher_n_probes=2,
+        seed=42,
+    )
+    assert samples.shape == (5, len(small_model.x0))
+    assert phi_samples.shape == (5, n_phi)
+    assert logp.shape == (5,)
+    assert accepts.shape == (5,)
+    assert isinstance(final_step, float)
+    assert np.all(np.isfinite(phi_samples))
+    assert not np.allclose(phi_samples[0], phi_samples[-1])

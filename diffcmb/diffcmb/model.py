@@ -85,12 +85,18 @@ class CosmologyAdvancedSampling:
     refactors can split responsibilities.
     """
 
-    def __init__(self, _lmax, _NSIDE, _noisesig, data_mode='synthetic', data_dir=None, parameterization='centered', dtype=None, use_matrixfree_sht=False, sht_nthreads=0):
+    def __init__(self, _lmax, _NSIDE, _noisesig, data_mode='synthetic', data_dir=None, parameterization='centered', dtype=None, use_matrixfree_sht=False, sht_nthreads=0, beam_fwhm_arcmin=None):
         if dtype is None:
             dtype = tf.complex64 if tf is not None else None
         self.dtype = dtype
         lcdm_parameters = np.array([67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066])
         self.parameterization = parameterization
+        # Forward-model realism pre-condition (ROADMAP.md Section 2): Gaussian
+        # beam + HEALPix pixel window as a diagonal per-l multiply on the
+        # unlensed alm before synthesis, applied in _psi_tf_raw and
+        # lensing.py's lens_map_tf/psi_lensed. Opt-in (None = no beam/pixwin,
+        # identical to prior behaviour) so existing call sites are unaffected.
+        self.beam_fwhm_arcmin = beam_fwhm_arcmin
         # Phase 1.5 (ROADMAP.md): matrix-free ducc0 SHT in place of the dense
         # `sph` matrix. Opt-in only — the dense path stays the default so
         # existing production runs/checkpoints are unaffected. See
@@ -312,6 +318,14 @@ class CosmologyAdvancedSampling:
         self.alm_weights = tf.convert_to_tensor(_w, dtype=self.dtype)
         self.l_indices = tf.convert_to_tensor(_l_idx, dtype=np.int32)
 
+        if self.beam_fwhm_arcmin is not None:
+            from .power import beam_pixwin_transfer
+
+            beam_per_l = beam_pixwin_transfer(self.lmax, self.beam_fwhm_arcmin, self.NSIDE)
+            self.beam_pixwin_per_l = tf.convert_to_tensor(beam_per_l, dtype=tf.float64)
+        else:
+            self.beam_pixwin_per_l = None
+
         _lw = np.ones(len_alm, dtype=np.float32)
         _count = 0
         for L in range(self.lmax):
@@ -443,6 +457,9 @@ class CosmologyAdvancedSampling:
 
 
         _a = splittosingularalm_tf(_realalm, _imagalm, _lmax)
+
+        if self.beam_pixwin_per_l is not None:
+            _a = _a * tf.cast(tf.gather(self.beam_pixwin_per_l, self.l_indices), _a.dtype)
 
         if self.use_matrixfree_sht:
             from .sht_ducc import masked_synthesis_tf

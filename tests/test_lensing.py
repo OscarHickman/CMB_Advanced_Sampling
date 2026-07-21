@@ -320,6 +320,42 @@ def test_psi_lensed_zero_phi_matches_unlensed():
 
 
 @pytest.mark.skipif(not HAS_TF or not HAS_HEALPY, reason="TF or healpy not installed")
+def test_psi_lensed_zero_phi_matches_unlensed_with_beam():
+    """psi_lensed with phi=0 must equal model._psi_tf_raw when a beam is set,
+    exactly as test_psi_lensed_zero_phi_matches_unlensed does unbeamed --
+    confirms lens_map_tf/psi_lensed's beam_pixwin_per_l application
+    (lensing.py) is consistent with _psi_tf_raw's (model.py, validated
+    directly against an independent healpy ground truth in
+    tests/test_model.py::test_psi_tf_beam_pixwin_matches_ground_truth_synthesis)."""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from diffcmb import CosmologyAdvancedSampling
+    model = CosmologyAdvancedSampling(
+        _lmax=LMAX, _NSIDE=NSIDE, _noisesig=100.0,
+        data_mode="synthetic", dtype=tf.complex128, beam_fwhm_arcmin=30.0,
+    )
+    model._ensure_tf_tensors()
+    lmax = model.lmax
+
+    params_np = np.zeros(lmax - 2 + (lmax * (lmax + 1) // 2 - 3) + (lmax - 2) * (lmax - 1) // 2)
+    params_np[: lmax - 2] = 5.0
+
+    params_tf = tf.constant(params_np, dtype=tf.float64)
+    n_phi = (lmax * (lmax + 1) // 2 - 3) + (lmax - 2) * (lmax - 1) // 2
+    phi_tf = tf.zeros(n_phi, dtype=tf.float64)
+
+    from diffcmb.lensing import psi_lensed
+    psi_lens_val = psi_lensed(model, params_tf, phi_tf).numpy()
+    psi_unlens_val = model._psi_tf_raw(params_tf).numpy()
+
+    np.testing.assert_allclose(
+        psi_lens_val, psi_unlens_val, rtol=1e-6,
+        err_msg="psi_lensed(phi=0, beamed) != _psi_tf_raw(beamed)"
+    )
+
+
+@pytest.mark.skipif(not HAS_TF or not HAS_HEALPY, reason="TF or healpy not installed")
 def test_psi_lensed_alm_grad_vs_fd():
     """dL/dalm from TF autodiff on psi_lensed agrees with finite differences."""
     from diffcmb.lensing import psi_lensed
@@ -581,3 +617,257 @@ def test_psi_lensed_matrixfree_matches_dense():
 
     np.testing.assert_allclose(val_mf.numpy(), val_dense.numpy(), rtol=1e-6)
     np.testing.assert_allclose(grad_mf, grad_dense, rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 7 — matrix-free vs dense, masked sky (ROADMAP.md Section 1: "Not yet
+#     re-validated on a masked sky" -- the dense-reference discipline applied
+#     to the masked-sky matrix-free lensing path for the first time, before
+#     any masked-sky Phase 2 chain such as the planned f_sky~0.016
+#     patch-scale sanity check.)
+# ---------------------------------------------------------------------------
+
+def _polar_cap_mask_idx(nside, f_sky):
+    """Contiguous polar-cap mask index set covering the requested f_sky
+    fraction of the sphere (same construction as test_samplers.py's
+    small_masked_matrixfree_model fixture)."""
+    npix = 12 * nside * nside
+    theta, _ = hp.pix2ang(nside, np.arange(npix))
+    cutoff = np.arccos(1 - 2 * f_sky)
+    return np.where(theta < cutoff)[0]
+
+
+def _make_masked_dense_model(lmax=LMAX, nside=NSIDE, f_sky=0.3):
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from diffcmb import CosmologyAdvancedSampling
+    model = CosmologyAdvancedSampling(
+        _lmax=lmax, _NSIDE=nside, _noisesig=100.0,
+        data_mode="synthetic", dtype=tf.complex128,
+    )
+    model.unmasked_idx = _polar_cap_mask_idx(nside, f_sky)
+    model._ensure_tf_tensors()
+    return model
+
+
+def _make_masked_matrixfree_model(lmax=LMAX, nside=NSIDE, f_sky=0.3):
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from diffcmb import CosmologyAdvancedSampling
+    model = CosmologyAdvancedSampling(
+        _lmax=lmax, _NSIDE=nside, _noisesig=100.0,
+        data_mode="synthetic", dtype=tf.complex128, use_matrixfree_sht=True,
+    )
+    model.unmasked_idx = _polar_cap_mask_idx(nside, f_sky)
+    model._ensure_tf_tensors()
+    return model
+
+
+@pytest.mark.skipif(not HAS_HEALPY or not HAS_TF, reason="healpy/tf not installed")
+def test_lens_map_tf_matrixfree_matches_dense_masked_sky():
+    """lens_map_tf: matrix-free ducc0 synthesis vs the dense Y-matrix path
+    agree to numerical precision on a masked sky (f_sky~0.3, a polar cap),
+    the first correctness check of the matrix-free path outside full-sky."""
+    dense_model = _make_masked_dense_model()
+    mf_model = _make_masked_matrixfree_model()
+    np.testing.assert_array_equal(dense_model.unmasked_idx, mf_model.unmasked_idx)
+    assert len(dense_model.unmasked_idx) < dense_model.NPIX, "mask should be nontrivial"
+
+    rng = np.random.default_rng(23)
+    alm_packed = _rand_alm_packed(LMAX, rng)
+    phi_hp = np.zeros(hp.Alm.getsize(LMAX - 1), dtype=np.complex128)  # zero phi
+
+    from diffcmb.lensing import lens_map_tf
+    T_dense = lens_map_tf(dense_model, tf.constant(alm_packed, tf.float64), phi_hp).numpy()
+    T_mf = lens_map_tf(mf_model, tf.constant(alm_packed, tf.float64), phi_hp).numpy()
+
+    np.testing.assert_allclose(T_mf, T_dense, rtol=1e-6, atol=1e-8)
+
+
+@pytest.mark.skipif(not HAS_HEALPY or not HAS_TF, reason="healpy/tf not installed")
+def test_psi_lensed_matrixfree_matches_dense_masked_sky_zero_phi():
+    """psi_lensed: matrix-free vs dense give the same log-posterior value and
+    gradient on a masked sky when phi=0 (identity lensing) -- a valid
+    comparison because the dense path's zero-padding-outside-the-mask
+    artifact (see the nonzero-phi note below) can't matter when there's no
+    deflection to sample it. Nonzero-phi masked-sky matrix-free gradients
+    are checked directly against finite differences instead, in
+    test_psi_lensed_matrixfree_alm_grad_vs_fd_masked_sky below."""
+    dense_model = _make_masked_dense_model()
+    mf_model = _make_masked_matrixfree_model()
+    np.testing.assert_array_equal(dense_model.unmasked_idx, mf_model.unmasked_idx)
+
+    rng = np.random.default_rng(29)
+    _sync_prior_map(dense_model, mf_model, rng)
+
+    lmax = LMAX
+    n_lncl = lmax - 2
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    params_np = np.zeros(n_lncl + n_real + n_imag)
+    params_np[:n_lncl] = 5.0
+    params_np[n_lncl:] = rng.standard_normal(n_real + n_imag) * 0.1
+    params_tf = tf.Variable(params_np, dtype=tf.float64)
+
+    phi_tf = tf.zeros(n_real + n_imag, dtype=tf.float64)
+
+    from diffcmb.lensing import psi_lensed
+
+    with tf.GradientTape() as tape:
+        val_dense = psi_lensed(dense_model, params_tf, phi_tf)
+    grad_dense = tape.gradient(val_dense, params_tf).numpy()
+
+    with tf.GradientTape() as tape:
+        val_mf = psi_lensed(mf_model, params_tf, phi_tf)
+    grad_mf = tape.gradient(val_mf, params_tf).numpy()
+
+    np.testing.assert_allclose(val_mf.numpy(), val_dense.numpy(), rtol=1e-6)
+    np.testing.assert_allclose(grad_mf, grad_dense, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not HAS_HEALPY or not HAS_TF, reason="healpy/tf not installed")
+def test_psi_lensed_matrixfree_alm_grad_vs_fd_masked_sky():
+    """dL/dalm from TF autodiff on the matrix-free psi_lensed agrees with
+    finite differences on a masked sky (f_sky~0.3), nonzero phi.
+
+    NOTE (real finding, 2026-07-18): comparing matrix-free vs *dense*
+    gradients at nonzero phi on a masked sky (mirroring the full-sky
+    dense-reference test above) fails at up to 8% relative error on ~58% of
+    components. Root cause is not a matrix-free bug: the dense path's
+    lens_map_tf/psi_lensed only ever computes T_unlensed at the model's
+    unmasked pixels and *zero-pads* everything else before bilinear
+    deflection-interpolation (lensing.py's `unsorted_segment_sum` scatter) --
+    an unphysical discontinuity at the mask edge that nonzero-phi deflection
+    samples can land on. This is exactly the scenario sht_ducc.py's
+    full_synthesis_tf docstring and CLAUDE.md were written to avoid ("lensing
+    needs this because deflected positions can fall outside the eventual
+    mask") -- the dense path was never a valid masked+lensed reference, only
+    a valid masked+identity (phi=0) one (see the test above). So the correct
+    validation of matrix-free masked-sky gradients is a direct FD check, not
+    a dense comparison; this test is that check, and it passes on its own
+    terms."""
+    from diffcmb.lensing import psi_lensed
+    model = _make_masked_matrixfree_model()
+    lmax = model.lmax
+    n_lncl = lmax - 2
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+
+    rng = np.random.default_rng(31)
+    params_np = np.zeros(n_lncl + n_real + n_imag)
+    params_np[:n_lncl] = 5.0
+    params_np[n_lncl:] = rng.standard_normal(n_real + n_imag) * 0.1
+    phi_np = _rand_phi_packed(lmax, rng, amplitude=1e-4)
+
+    params_var = tf.Variable(params_np, dtype=tf.float64)
+    phi_tf = tf.constant(phi_np, dtype=tf.float64)
+
+    with tf.GradientTape() as tape:
+        val = psi_lensed(model, params_var, phi_tf)
+    g_auto = tape.gradient(val, params_var).numpy()
+
+    eps = 1e-5
+    g_fd = np.zeros(len(params_np))
+    for i in range(n_lncl, n_lncl + 5):
+        p_p = params_np.copy()
+        p_p[i] += eps
+        p_m = params_np.copy()
+        p_m[i] -= eps
+        lp = psi_lensed(model, tf.constant(p_p, tf.float64), phi_tf).numpy()
+        lm = psi_lensed(model, tf.constant(p_m, tf.float64), phi_tf).numpy()
+        g_fd[i] = (lp - lm) / (2 * eps)
+
+    alm_slice = slice(n_lncl, n_lncl + 5)
+    np.testing.assert_allclose(
+        g_auto[alm_slice], g_fd[alm_slice], rtol=1e-4, atol=1e-6,
+        err_msg="dL/dalm autodiff vs FD mismatch in masked-sky matrix-free psi_lensed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8 — estimate_phi_diag_fisher: coordinate-sampled diagonal likelihood-
+#     curvature estimate for the phi HMC preconditioner (ROADMAP.md Section
+#     1, "Simulation validation" follow-up -- the prior-only phi mass matrix
+#     was found to leave the phi block barely mixing at lmax=300).
+#
+#     Design note: an earlier joint-random-direction (true Hutchinson)
+#     probe was tried and abandoned -- perturbing all ~n_phi modes at once
+#     crosses the same C0-but-not-C1 bilinear-interpolation-cell boundary
+#     documented in test_psi_lensed_phi_grad_vs_fd's eps note, and even
+#     after rescaling eps to avoid that, the off-diagonal coupling in this
+#     Hessian is large enough that Hutchinson's estimator needs far more
+#     than a handful of probes to converge (empirically: 40 joint probes
+#     gave per-probe estimates in the thousands against a true diagonal of
+#     ~110). Perturbing one packed-phi coordinate at a time instead (the
+#     same FD-of-analytic-gradient computation the brute-force reference
+#     below uses, just on a sampled subset rather than every mode) is
+#     stable and low-variance by construction.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not HAS_TF or not HAS_HEALPY, reason="TF or healpy not installed")
+def test_estimate_phi_diag_fisher_vs_dense_hessian_small_lmax():
+    """estimate_phi_diag_fisher's per-L curvature estimate should closely
+    match a brute-force FD-of-analytic-gradient diagonal Hessian of
+    psi_lensed at one chosen L. With n_probes >= the mode count at that L,
+    the estimator samples every mode there deterministically, so this
+    should match the dense reference tightly (not just in expectation).
+    """
+    from diffcmb.lensing import estimate_phi_diag_fisher, psi_lensed
+    model = _make_model()
+    lmax = model.lmax
+    n_lncl = lmax - 2
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+
+    rng = np.random.default_rng(21)
+    params_np = np.zeros(n_lncl + n_real + n_imag)
+    params_np[:n_lncl] = 5.0
+    params_np[n_lncl:] = rng.standard_normal(n_real + n_imag) * 0.1
+    params_tf = tf.constant(params_np, dtype=tf.float64)
+    phi_np = _rand_phi_packed(lmax, rng, amplitude=1e-4)
+
+    def grad_at(phi_val):
+        phi_var = tf.Variable(phi_val, dtype=tf.float64)
+        with tf.GradientTape() as tape:
+            val = psi_lensed(model, params_tf, phi_var)
+        return tape.gradient(val, phi_var).numpy()
+
+    # Brute-force exact diagonal Hessian (central FD of the analytic
+    # gradient, one index at a time) for every packed-phi mode at L=6,
+    # matching estimate_phi_diag_fisher's per-L averaging convention.
+    from diffcmb.samplers import _alm_index_lm
+    L_arr, _m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    probe_L = 6
+    idx_at_L = np.where(L_arr == probe_L)[0]
+    assert len(idx_at_L) > 0
+
+    eps = 1e-9
+    dense_diag = np.zeros(len(idx_at_L))
+    for k, i in enumerate(idx_at_L):
+        phi_p = phi_np.copy()
+        phi_p[i] += eps
+        phi_m = phi_np.copy()
+        phi_m[i] -= eps
+        g_p = grad_at(phi_p)[i]
+        g_m = grad_at(phi_m)[i]
+        dense_diag[k] = (g_p - g_m) / (2 * eps)
+    dense_ref_at_L = np.mean(np.maximum(dense_diag, 0.0))
+
+    # n_probes=40 exceeds the mode count at every L for this small model
+    # (max multiplicity is 2*lmax-1=39), so every L is sampled exhaustively
+    # and deterministically -- the comparison below is not stochastic.
+    diag_fisher_per_L = estimate_phi_diag_fisher(
+        model, params_tf, tf.constant(phi_np, dtype=tf.float64), lmax,
+        n_probes=40, rng=np.random.default_rng(5),
+    )
+
+    assert diag_fisher_per_L.shape == (lmax,)
+    assert np.all(diag_fisher_per_L >= 0.0)
+    np.testing.assert_allclose(
+        diag_fisher_per_L[probe_L], dense_ref_at_L, rtol=0.05, atol=1e-6,
+        err_msg="estimate_phi_diag_fisher diverges from the brute-force "
+                "dense diagonal Hessian reference at L=6 (exhaustive sampling "
+                "there should match closely, not just in expectation)"
+    )

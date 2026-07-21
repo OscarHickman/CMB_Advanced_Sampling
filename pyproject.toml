@@ -6,7 +6,8 @@ authors = ["Oscar Hickman <oscar.hickman17@alumni.imperial.ac.uk>"]
 
 [tool.ruff]
 line-length = 88
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "C", "I", "B"]
-ignore = ["E501", "C901", "E402", "F401", "B904", "E741"]
+ignore = ["E501", "C901", "E402", "F401", "B904", "E741", "B905"]

@@ -668,6 +668,37 @@ def build_phi_prior_mass_sqrt(lmax, cl_phiphi_full):
     return mass_sqrt
 
 
+def build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L):
+    """Like build_phi_prior_mass_sqrt, but adds a per-L likelihood-curvature
+    estimate (diag_fisher_per_L, e.g. from estimate_phi_diag_fisher in
+    lensing.py) to the prior precision 1/cl_phiphi before taking the sqrt --
+    the same '1/C_l + Ninv_eff' pattern model.build_posterior_mass_sqrt uses
+    for the alm block. diag_fisher_per_L=0 reduces exactly to
+    build_phi_prior_mass_sqrt.
+    """
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    mass_sqrt = np.empty(n_real + n_imag, dtype=np.float64)
+    idx = 0
+    for L in range(2, lmax):
+        cl = max(float(cl_phiphi_full[L]) if L < len(cl_phiphi_full) else 1e-30, 1e-30)
+        base = 1.0 / cl + float(diag_fisher_per_L[L])
+        scale = np.sqrt(base)
+        for _ in range(L + 1):
+            mass_sqrt[idx] = scale
+            idx += 1
+    for L in range(2, lmax):
+        cl = max(float(cl_phiphi_full[L]) if L < len(cl_phiphi_full) else 1e-30, 1e-30)
+        base = 1.0 / cl + float(diag_fisher_per_L[L])
+        scale = np.sqrt(base)
+        for m in range(L + 1):
+            if m >= 2:
+                mass_sqrt[idx] = scale
+                idx += 1
+    assert idx == n_real + n_imag
+    return mass_sqrt
+
+
 def run_gibbs_chain(
     model,
     n_samples=1000,
@@ -689,6 +720,9 @@ def run_gibbs_chain(
     phi_hmc_step_size=0.05,
     phi_n_lfs=20,
     phi_target_accept=0.65,
+    phi_mass_matrix='prior',
+    phi_fisher_warmup_iter=20,
+    phi_fisher_n_probes=8,
 ):
     """Gibbs sampler alternating exact C_l | alm (inverse-Gamma) + alm | C_l steps.
 
@@ -724,6 +758,17 @@ def run_gibbs_chain(
     shape (n_samples, n_real_alm + n_imag_alm), same packed layout as alm.
     Requires `alm_sampler='hmc'` (the CG path assumes an unlensed Gaussian
     conditional, which no longer holds once phi is in the model).
+
+    `phi_mass_matrix` selects the Block 3 HMC preconditioner: 'prior'
+    (default, unchanged behaviour) uses build_phi_prior_mass_sqrt (prior
+    curvature 1/cl_phiphi only). 'fisher' additionally folds in a
+    likelihood-curvature estimate (lensing.py::estimate_phi_diag_fisher,
+    build_phi_posterior_mass_sqrt) computed once at burn-in iteration
+    `phi_fisher_warmup_iter` (so the chain state has moved past the literal
+    warm-start point first) using `phi_fisher_n_probes` coordinate samples
+    per L -- addresses the prior-only mass matrix leaving the phi block
+    barely mixing at production lmax (ROADMAP.md's "Simulation validation"
+    entry, achievements.md).
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
@@ -794,6 +839,8 @@ def run_gibbs_chain(
                 else np.zeros(n_phi, dtype=np.float64)
             )
 
+    phi_fisher_done = phi_mass_matrix != 'fisher'  # already "done" -- no-op
+
     n_collected = len(samples_out)
     n_samples_remaining = n_samples - n_collected
     burnin_remaining = 0 if resuming else n_burnin
@@ -819,7 +866,7 @@ def run_gibbs_chain(
     cl_full[2:] = np.exp(current_lncl)
 
     if sample_phi:
-        from .lensing import log_prob_phi_block, psi_lensed
+        from .lensing import estimate_phi_diag_fisher, log_prob_phi_block, psi_lensed
 
         model._ensure_tf_tensors()
         phi_mass_sqrt_np = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
@@ -978,6 +1025,30 @@ def run_gibbs_chain(
             logp_val = float(-model._psi_tf_raw(full_p))
 
         recent.append(accepted)
+
+        # --- Fisher-informed phi mass matrix (opt-in, one-time recompute) ---
+        # Waits until phi_fisher_warmup_iter so the chain state has moved
+        # past the literal warm-start point before measuring curvature there.
+        if sample_phi and not phi_fisher_done and is_burnin and i >= min(
+            phi_fisher_warmup_iter, max(burnin_remaining - 1, 0)
+        ):
+            alm_now = (
+                state_var.numpy() / mass_sqrt_np if alm_sampler == 'hmc' else current_alm_np
+            )
+            full_params_now = np.concatenate([current_lncl, alm_now])
+            phi_now = phi_state_var.numpy() / phi_mass_sqrt_np
+            diag_fisher_per_L = estimate_phi_diag_fisher(
+                model,
+                tf.constant(full_params_now, dtype=tf.float64),
+                tf.constant(phi_now, dtype=tf.float64),
+                lmax,
+                n_probes=phi_fisher_n_probes,
+                rng=rng,
+            )
+            phi_mass_sqrt_np = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
+            phi_state_var.assign(tf.constant(phi_now * phi_mass_sqrt_np, dtype=tf.float64))
+            phi_mass_sqrt_var.assign(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
+            phi_fisher_done = True
 
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:
