@@ -82,7 +82,8 @@ def integrated_autocorr_time(x, c=5.0):
     n = len(x)
     x = np.asarray(x, dtype=np.float64)
     x = x - x.mean()
-    if np.allclose(x, 0.0):
+    scale = np.abs(x).max()
+    if scale == 0.0 or np.allclose(x / scale, 0.0):
         return 1.0, float(n)
 
     f = np.fft.fft(x, n=2 * n)
