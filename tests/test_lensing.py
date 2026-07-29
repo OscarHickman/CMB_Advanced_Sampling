@@ -871,3 +871,141 @@ def test_estimate_phi_diag_fisher_vs_dense_hessian_small_lmax():
                 "dense diagonal Hessian reference at L=6 (exhaustive sampling "
                 "there should match closely, not just in expectation)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 9 — Optional Block 4: compute_sl_phi_np / sample_cl_phiphi_given_phi
+#     (ROADMAP.md's lowest-priority optional item -- "C_l^phiphi|phi exact
+#     inverse-Gamma, same structure as Block 1"). log_prob_phi_block's
+#     Gaussian prior term on phi has the identical per-L quadratic-form
+#     structure as the CMB alm prior that model.py::compute_sl_np /
+#     sample_cl_given_alm already exploit for Block 1, so validate the phi
+#     analogue the same way: (a) cross-check the m=0-vs-m>=1 weighting
+#     against an independent brute-force sum over the healpy-ordered
+#     (unpacked) complex alm -- this is exactly the kind of weighting mistake
+#     flagged elsewhere in this project (a uniform 1/C_l used where the real
+#     convention needs 2/C_l for m>0); (b) confirm the exact-draw recovers a
+#     known generating C_L^phiphi across many independent realizations.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy not installed")
+def test_compute_sl_phi_np_matches_brute_force_healpy_ordering():
+    """compute_sl_phi_np's S_L = sum_{m=-L}^{L} |phi_Lm|^2 (packed layout,
+    weight 1 for m=0 / weight 2*(re^2+im^2) for m>=1) must match a brute-force
+    sum computed independently from the healpy-ordered (unpacked) complex alm
+    via the standard real-field identity
+        sum_{m=-L}^{L} |a_Lm|^2 = |a_L0|^2 + 2 * sum_{m=1}^{L} |a_Lm|^2.
+    _rand_phi_packed already zeros Im(phi_{L,1}) when round-tripping through
+    _alm_hp_to_packed (same packed convention as the CMB alm), so the two
+    sums are computed on identical underlying data and should match to
+    float64 precision, not just approximately.
+    """
+    from diffcmb.lensing import _alm_packed_to_hp, compute_sl_phi_np
+    lmax = 15
+    rng = np.random.default_rng(3)
+    phi_packed = _rand_phi_packed(lmax, rng, amplitude=1.0)
+
+    S = compute_sl_phi_np(phi_packed, lmax)
+
+    # ho_idx formula matches _alm_packed_to_hp/_alm_hp_to_packed exactly
+    # (this codebase's "healpy ordering" helper functions use this triangular
+    # L*(L+1)//2 + m indexing directly, not hp.Alm.getidx).
+    alm_hp = _alm_packed_to_hp(phi_packed, lmax)
+    S_brute = np.zeros(lmax)
+    for L in range(2, lmax):
+        s = 0.0
+        for m in range(L + 1):
+            ho_idx = L * (L + 1) // 2 + m
+            val = alm_hp[ho_idx]
+            weight = 1.0 if m == 0 else 2.0
+            s += weight * (val.real ** 2 + val.imag ** 2)
+        S_brute[L] = s
+
+    np.testing.assert_allclose(
+        S[2:lmax], S_brute[2:lmax], rtol=1e-10, atol=1e-16,
+        err_msg="compute_sl_phi_np diverges from the brute-force "
+                "healpy-ordering S_L reference -- check the m=0-vs-m>=1 "
+                "weighting convention"
+    )
+
+
+def test_sample_cl_phiphi_given_phi_recovers_known_spectrum():
+    """Exact-draw recovery check: draw many independent phi realizations
+    from a known constant C_L^phiphi = C0 (using the per-mode Gaussian
+    variances implied by log_prob_phi_block's prior term -- Var(re)=C_L for
+    m=0, Var(re)=Var(im)=C_L/2 for m>=1, matching the weight-1/weight-2
+    convention compute_sl_phi_np mirrors from compute_sl_np), draw one
+    posterior C_L sample per realization via sample_cl_phiphi_given_phi, and
+    confirm the empirical mean across realizations recovers C0 (up to the
+    known, small finite-L bias of a flat-prior InvGamma posterior mean --
+    E[C_L_sampled] = C0 * L/(L-1.5) under this generative model, a ~6% effect
+    at L=25 that shrinks as L grows) to within a statistical margin (mean +/-
+    6 standard errors around that expected, not the naively unbiased, value)
+    -- this still catches gross convention errors (e.g. a 2x weighting bug,
+    which would be a ~100% effect, far outside 6 standard errors) while not
+    penalizing the estimator for a bias that is expected and benign.
+    """
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = 30
+    L_probe = 25
+    C0 = 3e-9
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_tot = n_real + n_imag
+
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    is_real = np.arange(n_tot) < n_real
+    var = np.empty(n_tot)
+    real_idx = np.where(is_real)[0]
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    imag_idx = np.where(~is_real)[0]
+    var[imag_idx] = C0 / 2.0
+    std = np.sqrt(var)
+
+    rng = np.random.default_rng(11)
+    n_rep = 3000
+    cl_draws = np.empty(n_rep)
+    for i in range(n_rep):
+        phi_packed = rng.normal(scale=std)
+        lncl = sample_cl_phiphi_given_phi(phi_packed, lmax, rng=rng)
+        cl_draws[i] = np.exp(lncl[L_probe - 2])
+
+    recovered = float(np.mean(cl_draws))
+    se = float(np.std(cl_draws, ddof=1) / np.sqrt(n_rep))
+    expected = C0 * L_probe / (L_probe - 1.5)  # flat-prior InvGamma posterior-mean bias
+    assert abs(recovered - expected) < 6 * se, (
+        f"sample_cl_phiphi_given_phi failed to recover the expected "
+        f"(bias-adjusted) C_L={expected:.3e} at L={L_probe} from true "
+        f"C0={C0:.3e} (recovered {recovered:.3e} +/- {se:.3e}) -- check "
+        f"compute_sl_phi_np's m=0-vs-m>=1 weighting"
+    )
+
+
+def test_sample_cl_phiphi_given_phi_matches_false_when_zero_phi():
+    """phi=0 -> S_L=0 for all L -> sampled C_L should be at (or clipped near)
+    the numerical floor, not some arbitrary finite value -- a basic sanity
+    check that beta's floor (1e-60) and the output clip (1e-30) are wired
+    together consistently."""
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+    lmax = 10
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi_packed = np.zeros(n_real + n_imag)
+    rng = np.random.default_rng(0)
+    lncl = sample_cl_phiphi_given_phi(phi_packed, lmax, rng=rng)
+    assert lncl.shape == (lmax - 2,)
+    assert np.all(np.isfinite(lncl))
+    assert np.all(np.exp(lncl) <= 1e-20)
+
+
+def test_sample_cl_phiphi_given_phi_rejects_non_finite_input():
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+    lmax = 10
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi_packed = np.zeros(n_real + n_imag)
+    phi_packed[0] = np.nan
+    with pytest.raises(ValueError):
+        sample_cl_phiphi_given_phi(phi_packed, lmax)

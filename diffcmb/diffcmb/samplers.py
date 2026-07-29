@@ -723,6 +723,7 @@ def run_gibbs_chain(
     phi_mass_matrix='prior',
     phi_fisher_warmup_iter=20,
     phi_fisher_n_probes=8,
+    sample_cl_phiphi=False,
 ):
     """Gibbs sampler alternating exact C_l | alm (inverse-Gamma) + alm | C_l steps.
 
@@ -769,6 +770,24 @@ def run_gibbs_chain(
     per L -- addresses the prior-only mass matrix leaving the phi block
     barely mixing at production lmax (ROADMAP.md's "Simulation validation"
     entry, achievements.md).
+
+    `sample_cl_phiphi` (opt-in, default False, requires `cl_phiphi_full` to
+    also be given): adds a fourth Gibbs step, `C_L^phiphi | phi`, an exact
+    inverse-Gamma draw with the same structure as Block 1 (see
+    lensing.py::compute_sl_phi_np / sample_cl_phiphi_given_phi). When enabled,
+    `cl_phiphi_full` is used only as the initial spectrum; from then on it is
+    resampled every sweep from the current phi state (same pattern as
+    `current_lncl`/`mass_sqrt_np` for the alm block), the phi HMC mass matrix
+    is rebuilt from the new spectrum each sweep via build_phi_prior_mass_sqrt,
+    and phi's whitened HMC state is rescaled to match -- mirroring exactly
+    how `state_var`/`mass_sqrt_var` are rebuilt every sweep for the alm block.
+    Returns an additional `cl_phiphi_samples` array (shape (n_samples,
+    lmax-2), log-spectrum per sample) as the last element of the return
+    tuple. Not currently supported together with `phi_mass_matrix='fisher'`
+    (raises ValueError) -- the Fisher-informed mass matrix is estimated once
+    at burn-in and frozen thereafter, and combining that with a spectrum that
+    keeps changing every sweep would need its own validation this change does
+    not attempt.
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
@@ -779,6 +798,15 @@ def run_gibbs_chain(
     sample_phi = cl_phiphi_full is not None
     if sample_phi and alm_sampler not in ('hmc', 'cg'):
         raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc' or 'cg'")
+    if sample_cl_phiphi and not sample_phi:
+        raise ValueError("sample_cl_phiphi=True (Block 4) requires cl_phiphi_full to be given")
+    if sample_cl_phiphi and phi_mass_matrix == 'fisher':
+        raise ValueError(
+            "sample_cl_phiphi=True is not supported together with "
+            "phi_mass_matrix='fisher' -- the Fisher-informed mass matrix is "
+            "estimated once at burn-in and frozen thereafter, which would be "
+            "inconsistent with a spectrum that keeps changing every sweep"
+        )
     # alm_sampler='cg' + sample_phi is the Phase 2 gate-2 exactness experiment
     # (ROADMAP.md Section 1): Block 2 draws an exact Gaussian alm sample against
     # the *unlensed* operator (sample_alm_cg's target is model._psi_tf_raw,
@@ -803,6 +831,7 @@ def run_gibbs_chain(
     phi_samples_out = []
     phi_accepts_out = []
     phi_step_float = phi_hmc_step_size
+    cl_phiphi_out = []
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         ckpt = np.load(checkpoint_path, allow_pickle=True)
@@ -819,6 +848,16 @@ def run_gibbs_chain(
             phi_accepts_out = list(ckpt["phi_accepts"].tolist())
             phi_current_np = ckpt["phi_state"].copy()
             phi_step_float = float(ckpt["phi_step_size"])
+        if sample_cl_phiphi:
+            # "cl_phiphi_state"/"cl_phiphi_samples" are only present in
+            # checkpoints written by a sample_cl_phiphi=True run -- fall back
+            # to the caller-supplied cl_phiphi_full for checkpoints from
+            # before this feature existed, so old checkpoints stay loadable.
+            if "cl_phiphi_state" in ckpt.files:
+                cl_phiphi_full = ckpt["cl_phiphi_state"].copy()
+                cl_phiphi_out = list(ckpt["cl_phiphi_samples"])
+            else:
+                cl_phiphi_full = np.array(cl_phiphi_full, dtype=np.float64).copy()
         print(f"Resumed from checkpoint: {len(samples_out)}/{n_samples} samples collected")
     else:
         if initial_params is not None:
@@ -838,6 +877,10 @@ def run_gibbs_chain(
                 if phi_initial is not None
                 else np.zeros(n_phi, dtype=np.float64)
             )
+        if sample_cl_phiphi:
+            # Local mutable working copy -- resampled every sweep from here
+            # on, never mutating the caller's original array.
+            cl_phiphi_full = np.array(cl_phiphi_full, dtype=np.float64).copy()
 
     phi_fisher_done = phi_mass_matrix != 'fisher'  # already "done" -- no-op
 
@@ -848,6 +891,15 @@ def run_gibbs_chain(
     if n_samples_remaining <= 0:
         print("All samples already collected from checkpoint.")
         if sample_phi:
+            if sample_cl_phiphi:
+                return (
+                    np.array(samples_out, dtype=np.float64),
+                    np.array(phi_samples_out, dtype=np.float64),
+                    np.array(logp_out, dtype=np.float64),
+                    np.array(accepts_out, dtype=bool),
+                    step_float,
+                    np.array(cl_phiphi_out, dtype=np.float64),
+                )
             return (
                 np.array(samples_out, dtype=np.float64),
                 np.array(phi_samples_out, dtype=np.float64),
@@ -866,7 +918,12 @@ def run_gibbs_chain(
     cl_full[2:] = np.exp(current_lncl)
 
     if sample_phi:
-        from .lensing import estimate_phi_diag_fisher, log_prob_phi_block, psi_lensed
+        from .lensing import (
+            estimate_phi_diag_fisher,
+            log_prob_phi_block,
+            psi_lensed,
+            sample_cl_phiphi_given_phi,
+        )
 
         model._ensure_tf_tensors()
         phi_mass_sqrt_np = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
@@ -1050,6 +1107,28 @@ def run_gibbs_chain(
             phi_mass_sqrt_var.assign(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
             phi_fisher_done = True
 
+        # --- Step 3a: C_L^phiphi | phi (opt-in, optional Block 4) ---
+        # Same position in the sweep as Step 1 (C_l | alm): draws the new
+        # spectrum from the phi state as of the end of the previous sweep,
+        # then rebuilds the phi HMC mass matrix and rescales the whitened
+        # phi state to match -- mirroring exactly how new_lncl/mass_sqrt_np/
+        # state_var are rebuilt for the alm block in Step 1/2 above.
+        # cl_phiphi_full is rebound here (not mutated in place); the
+        # phi_log_prob_whitened/phi_hmc_kernel closures above read it by name
+        # at call time (they run eagerly, never traced into a tf.function,
+        # because lens_map_phi_diff_tf's ducc0 call cannot be graph-traced),
+        # so this rebind is picked up by Step 3's HMC move below with no
+        # further wiring needed.
+        if sample_cl_phiphi:
+            phi_now_np = phi_state_var.numpy() / phi_mass_sqrt_np
+            new_lncl_phiphi = sample_cl_phiphi_given_phi(phi_now_np, lmax, rng)
+            cl_phiphi_full = cl_phiphi_full.copy()
+            cl_phiphi_full[2:lmax] = np.exp(new_lncl_phiphi)
+            new_phi_mass_sqrt = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
+            phi_state_var.assign(tf.constant(phi_now_np * new_phi_mass_sqrt, dtype=tf.float64))
+            phi_mass_sqrt_var.assign(tf.constant(new_phi_mass_sqrt, dtype=tf.float64))
+            phi_mass_sqrt_np = new_phi_mass_sqrt
+
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:
             phi_pkr = phi_hmc_kernel.bootstrap_results(phi_state_var)
@@ -1078,6 +1157,8 @@ def run_gibbs_chain(
                 phi_sample = phi_state_var.numpy() / phi_mass_sqrt_np
                 phi_samples_out.append(phi_sample)
                 phi_accepts_out.append(phi_accepted)
+                if sample_cl_phiphi:
+                    cl_phiphi_out.append(new_lncl_phiphi.copy())
 
             if checkpoint_path and len(samples_out) % checkpoint_every == 0:
                 ckpt_kwargs = {
@@ -1096,6 +1177,11 @@ def run_gibbs_chain(
                         phi_state=phi_sample.astype(np.float64),
                         phi_step_size=np.float64(phi_step_float),
                     )
+                if sample_cl_phiphi:
+                    ckpt_kwargs.update(
+                        cl_phiphi_samples=np.array(cl_phiphi_out, dtype=np.float64),
+                        cl_phiphi_state=cl_phiphi_full.astype(np.float64),
+                    )
                 np.savez(checkpoint_path, **ckpt_kwargs)
 
     print(
@@ -1104,6 +1190,15 @@ def run_gibbs_chain(
     )
     if sample_phi:
         print(f"  phi block: final step_size={phi_step_float:.4g}, mean accept={float(np.mean(phi_accepts_out)):.3f}")
+        if sample_cl_phiphi:
+            return (
+                np.array(samples_out, dtype=np.float64),
+                np.array(phi_samples_out, dtype=np.float64),
+                np.array(logp_out, dtype=np.float64),
+                np.array(accepts_out, dtype=bool),
+                step_float,
+                np.array(cl_phiphi_out, dtype=np.float64),
+            )
         return (
             np.array(samples_out, dtype=np.float64),
             np.array(phi_samples_out, dtype=np.float64),

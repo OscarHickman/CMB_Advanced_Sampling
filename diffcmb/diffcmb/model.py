@@ -85,7 +85,7 @@ class CosmologyAdvancedSampling:
     refactors can split responsibilities.
     """
 
-    def __init__(self, _lmax, _NSIDE, _noisesig, data_mode='synthetic', data_dir=None, parameterization='centered', dtype=None, use_matrixfree_sht=False, sht_nthreads=0, beam_fwhm_arcmin=None):
+    def __init__(self, _lmax, _NSIDE, _noisesig, data_mode='synthetic', data_dir=None, parameterization='centered', dtype=None, use_matrixfree_sht=False, sht_nthreads=0, beam_fwhm_arcmin=None, noise_map=None):
         if dtype is None:
             dtype = tf.complex64 if tf is not None else None
         self.dtype = dtype
@@ -97,6 +97,14 @@ class CosmologyAdvancedSampling:
         # lensing.py's lens_map_tf/psi_lensed. Opt-in (None = no beam/pixwin,
         # identical to prior behaviour) so existing call sites are unaffected.
         self.beam_fwhm_arcmin = beam_fwhm_arcmin
+        # Anisotropic per-pixel noise pre-condition (ROADMAP.md Section 2):
+        # noise_map, when given, is a length-NPIX array of per-pixel noise
+        # sigma (same convention/units as the scalar `_noisesig` it
+        # replaces -- i.e. Ninv[i] = 1/noise_map[i]**2) used to build a
+        # spatially-varying self.Ninv instead of the uniform
+        # 1/_noisesig**2. Opt-in (None = identical to the prior uniform-
+        # noise behaviour) so existing call sites are unaffected.
+        self.noise_map = noise_map
         # Phase 1.5 (ROADMAP.md): matrix-free ducc0 SHT in place of the dense
         # `sph` matrix. Opt-in only — the dense path stays the default so
         # existing production runs/checkpoints are unaffected. See
@@ -108,7 +116,14 @@ class CosmologyAdvancedSampling:
         if data_mode == 'synthetic':
             print("Generating synthetic data...")
             NPIX = 12 * (_NSIDE**2)
-            n = np.linspace(_noisesig, _noisesig, NPIX)
+            if noise_map is not None:
+                n = np.asarray(noise_map, dtype=np.float64)
+                if n.shape != (NPIX,):
+                    raise ValueError(
+                        f"noise_map must have shape ({NPIX},), got {n.shape}"
+                    )
+            else:
+                n = np.linspace(_noisesig, _noisesig, NPIX)
             self.Ninv = np.array([1.0 / (ni**2) for ni in n])
 
             lcdm_cls = None
@@ -123,6 +138,11 @@ class CosmologyAdvancedSampling:
             pad_lcdm_alms = hpalminit(notpad_lcdm_alms, _lmax)
             pad_lcdm_map = hpalmtomap(pad_lcdm_alms, _NSIDE, _lmax)
             pad_lcdm_map = hpmapsmooth(pad_lcdm_map, _lmax)
+            # noisemapfunc only supports a scalar noise std (used to draw the
+            # synthetic data realisation), so a nonuniform noise_map's first
+            # entry is used here -- this only affects the synthetic data
+            # realisation, not self.Ninv (the per-pixel likelihood weighting
+            # built above), which is the operator under test/validation.
             notpad_prior_map = noisemapfunc(pad_lcdm_map, n[0])[0]
             notpad_prior_halms = hpmaptoalm(notpad_prior_map, _lmax)
             pad_prior_halms = hpalminit(notpad_prior_halms, _lmax)
@@ -155,7 +175,15 @@ class CosmologyAdvancedSampling:
 
             self.prior_map[mask < 0.9] = 0.0
 
-            full_Ninv = np.ones(self.NPIX) / (_noisesig**2)
+            if noise_map is not None:
+                n = np.asarray(noise_map, dtype=np.float64)
+                if n.shape != (self.NPIX,):
+                    raise ValueError(
+                        f"noise_map must have shape ({self.NPIX},), got {n.shape}"
+                    )
+                full_Ninv = 1.0 / (n**2)
+            else:
+                full_Ninv = np.ones(self.NPIX) / (_noisesig**2)
             full_Ninv[mask < 0.9] = 0.0
             self.Ninv = full_Ninv
 

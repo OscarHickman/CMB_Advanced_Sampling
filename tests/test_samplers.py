@@ -508,3 +508,174 @@ def test_gibbs_chain_phi_mass_matrix_fisher_moves(small_model):
     assert isinstance(final_step, float)
     assert np.all(np.isfinite(phi_samples))
     assert not np.allclose(phi_samples[0], phi_samples[-1])
+
+
+# ── run_gibbs_chain: sample_cl_phiphi opt-in (optional Block 4) ─────────────
+
+@skip_no_tfp
+def test_gibbs_chain_sample_cl_phiphi_default_unchanged(small_model, monkeypatch):
+    """sample_cl_phiphi defaults to False -- sample_cl_phiphi_given_phi must
+    never be invoked in that mode (neither by omitting the parameter nor by
+    passing sample_cl_phiphi=False explicitly), matching the same
+    non-invocation pattern used above for phi_mass_matrix='prior' (this
+    codebase's HMC chain is not bit-for-bit reproducible across separate
+    run_gibbs_chain calls even with a fixed seed, so "unchanged" has to be
+    checked by non-invocation rather than by comparing output arrays)."""
+    from diffcmb import run_gibbs_chain
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("sample_cl_phiphi_given_phi must not be called when sample_cl_phiphi=False")
+
+    monkeypatch.setattr(
+        "diffcmb.lensing.sample_cl_phiphi_given_phi", _boom, raising=False
+    )
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    kwargs = {
+        "n_samples": 5, "n_burnin": 5, "hmc_step_size": 0.01, "n_lfs": 5,
+        "cl_phiphi_full": cl_phiphi_full, "phi_hmc_step_size": 0.01, "phi_n_lfs": 5,
+        "seed": 42,
+    }
+
+    run_gibbs_chain(small_model, **kwargs)
+    run_gibbs_chain(small_model, sample_cl_phiphi=False, **kwargs)
+
+
+def test_gibbs_chain_sample_cl_phiphi_requires_phi_block():
+    """sample_cl_phiphi=True without cl_phiphi_full (i.e. Block 3 disabled)
+    must raise, not silently no-op -- Block 4 only makes sense once phi is
+    itself being sampled."""
+    from diffcmb import run_gibbs_chain
+
+    class _DummyModel:
+        lmax = 10
+
+    with pytest.raises(ValueError, match="sample_cl_phiphi"):
+        run_gibbs_chain(_DummyModel(), n_samples=1, n_burnin=1, sample_cl_phiphi=True)
+
+
+@skip_no_tfp
+def test_gibbs_chain_sample_cl_phiphi_rejects_fisher_mass_matrix(small_model):
+    """sample_cl_phiphi=True combined with phi_mass_matrix='fisher' is not
+    supported (the Fisher mass matrix is estimated once at burn-in and
+    frozen thereafter, which would silently go stale against a spectrum that
+    keeps changing every sweep) -- must raise, not silently combine them."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    with pytest.raises(ValueError, match="fisher"):
+        run_gibbs_chain(
+            small_model, n_samples=1, n_burnin=1, hmc_step_size=0.01, n_lfs=5,
+            cl_phiphi_full=cl_phiphi_full, phi_hmc_step_size=0.01, phi_n_lfs=5,
+            phi_mass_matrix='fisher', sample_cl_phiphi=True, seed=42,
+        )
+
+
+@skip_no_tfp
+def test_gibbs_chain_sample_cl_phiphi_moves_and_returns_extra_array(small_model):
+    """sample_cl_phiphi=True runs Block 4 alongside Blocks 1-3, returns an
+    extra cl_phiphi_samples array as the last element of the return tuple,
+    and that array actually moves (is not stuck at its initial value)."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    # phi_initial defaults to all-zeros, which (with only 5 burn-in sweeps)
+    # never moves far enough from S_L=0 for Block 4 to escape its numerical
+    # floor clip -- start from a draw at the assumed prior scale instead, so
+    # there's real phi power for the exact-draw to pick up on straight away.
+    from diffcmb.samplers import _alm_index_lm
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    is_real = np.arange(n_phi) < n_real
+    var = np.empty(n_phi)
+    real_idx = np.where(is_real)[0]
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    imag_idx = np.where(~is_real)[0]
+    var[imag_idx] = C0 / 2.0
+    phi_initial = np.random.default_rng(3).normal(scale=np.sqrt(var))
+
+    samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = run_gibbs_chain(
+        small_model,
+        n_samples=8,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_initial=phi_initial,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        sample_cl_phiphi=True,
+        seed=42,
+    )
+    assert samples.shape == (8, len(small_model.x0))
+    assert phi_samples.shape == (8, n_phi)
+    assert logp.shape == (8,)
+    assert accepts.shape == (8,)
+    assert isinstance(final_step, float)
+    assert cl_phiphi_samples.shape == (8, lmax - 2)
+    assert np.all(np.isfinite(cl_phiphi_samples))
+    assert not np.allclose(cl_phiphi_samples[0], cl_phiphi_samples[-1])
+
+
+@skip_no_tfp
+def test_gibbs_chain_sample_cl_phiphi_recovers_known_spectrum(small_model):
+    """Smoke test (mirrors the achievements.md-style small-lmax validation
+    used elsewhere in this project): a short full run_gibbs_chain chain with
+    Block 4 enabled, starting phi already near its stationary distribution
+    for a known constant true C_L^phiphi, should keep the sampled spectrum
+    in the right ballpark of that true value rather than drifting to a
+    wildly different scale (which is what a weighting convention bug, e.g.
+    the classic 1/C_l-vs-2/C_l mistake, would produce)."""
+    from diffcmb import run_gibbs_chain
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    # Initialise phi from the assumed prior at C0 so the chain starts near
+    # its stationary distribution instead of needing to burn in the
+    # spectrum itself from a cold start in a handful of sweeps.
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    is_real = np.arange(n_phi) < n_real
+    var = np.empty(n_phi)
+    real_idx = np.where(is_real)[0]
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    imag_idx = np.where(~is_real)[0]
+    var[imag_idx] = C0 / 2.0
+    rng = np.random.default_rng(99)
+    phi_initial = rng.normal(scale=np.sqrt(var))
+
+    _samples, _phi_samples, _logp, _accepts, _final_step, cl_phiphi_samples = run_gibbs_chain(
+        small_model,
+        n_samples=40,
+        n_burnin=20,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_initial=phi_initial,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        sample_cl_phiphi=True,
+        seed=7,
+    )
+
+    recovered = np.exp(cl_phiphi_samples[:, -1]).mean()  # highest-L bin: least small-L bias
+    assert np.isfinite(recovered)
+    # Loose ballpark check by design (few samples, small lmax): catches gross
+    # convention errors (an order of magnitude or a 2x weighting bug) without
+    # over-fitting to this specific short chain's Monte Carlo noise.
+    assert 0.1 * C0 < recovered < 10.0 * C0, (
+        f"recovered C_L (highest-L bin) = {recovered:.3e}, expected within "
+        f"an order of magnitude of true C0={C0:.3e}"
+    )

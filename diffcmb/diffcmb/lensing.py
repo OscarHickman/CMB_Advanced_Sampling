@@ -92,6 +92,91 @@ def _alm_hp_to_packed(alm_hp: np.ndarray, lmax: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Optional Block 4 — C_L^phiphi | phi exact inverse-Gamma draw
+#
+# Mirrors model.py::CosmologyAdvancedSampling.compute_sl_np /
+# sample_cl_given_alm (Block 1) exactly: log_prob_phi_block's Gaussian prior
+# term on phi has the identical per-L quadratic-form structure (m=0 weight 1,
+# m>=1 weight 2*(re^2+im^2), same packed layout as the CMB alm above) as the
+# CMB alm prior that Block 1 exploits for its exact inverse-Gamma conditional,
+# so the same exact-conjugacy argument applies to phi's own power spectrum.
+# Implemented as free functions (not a model method) since phi has no
+# lmax-independent state beyond the packed vector itself.
+# ---------------------------------------------------------------------------
+
+def compute_sl_phi_np(phi_packed: np.ndarray, lmax: int) -> np.ndarray:
+    """Compute S_L = sum_{m=-L}^{L} |phi_{L,m}|^2 for L=0..lmax-1.
+
+    phi_packed: 1-D numpy array, packed real+imag layout as returned by
+    _alm_hp_to_packed (real parts L=2..lmax-1 m=0..L, then imaginary parts
+    L=2..lmax-1 m=2..L) -- same convention as model.py::compute_sl_np's
+    alm_flat_np argument.
+    """
+    n_real = lmax * (lmax + 1) // 2 - 3
+    real_p = phi_packed[:n_real]
+    imag_p = phi_packed[n_real:]
+    S = np.zeros(lmax)
+    r_idx = 0
+    i_idx = 0
+    for L in range(2, lmax):
+        for m in range(L + 1):
+            re = real_p[r_idx]
+            r_idx += 1
+            im = imag_p[i_idx] if m >= 2 else 0.0
+            if m >= 2:
+                i_idx += 1
+            if m == 0:
+                S[L] += re * re
+            else:
+                S[L] += 2.0 * (re * re + im * im)
+    return S
+
+
+def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> np.ndarray:
+    """Sample ln(C_L^phiphi) | phi for L=2..lmax-1 from the exact inverse-Gamma
+    conditional implied by log_prob_phi_block's Gaussian prior term:
+
+        C_L^phiphi | phi ~ InvGamma(alpha=L-0.5, beta=S_L/2)
+
+    where S_L = sum_{m=-L}^{L} |phi_{L,m}|^2 (compute_sl_phi_np). Same
+    structure as model.py::sample_cl_given_alm (Block 1), applied to phi.
+
+    Note on clipping: model.py::sample_cl_given_alm clips the sampled C_l to
+    [3e-7, 3e6], a range tuned to typical CMB C_l units. C_L^phiphi lives on
+    a very different scale (test fixtures and gate scripts in this repo use
+    cl_phiphi_full ~ 1e-6 down to ~1e-12), so that range would silently floor
+    away several orders of magnitude of real signal. We use a much wider
+    [1e-30, 1e10] clip here instead -- matching the 1e-30 floor already used
+    for cl_phiphi_full in build_phi_prior_mass_sqrt/build_phi_posterior_mass_sqrt
+    (samplers.py) -- purely to guard against non-finite results, not to impose
+    a physically meaningful bound.
+
+    Returns lncl_phiphi array of shape (lmax-2,).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if np.any(~np.isfinite(phi_packed)):
+        raise ValueError(
+            "Non-finite values (NaNs/Infs) detected in phi_packed during "
+            "sample_cl_phiphi_given_phi!"
+        )
+    S = compute_sl_phi_np(phi_packed, lmax)
+    lncl = np.empty(lmax - 2)
+    for i in range(lmax - 2):
+        L = i + 2
+        alpha = float(L) - 0.5
+        s_val = S[L]
+        if not np.isfinite(s_val) or s_val < 0.0:
+            s_val = 0.0
+        beta = max(s_val * 0.5, 1e-60)
+        g = rng.gamma(alpha, scale=1.0)
+        val_cl = beta / max(g, 1e-300)
+        val_cl = np.clip(val_cl, 1e-30, 1e10)
+        lncl[i] = np.log(val_cl)
+    return lncl
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — phi_alm → deflection field
 # ---------------------------------------------------------------------------
 

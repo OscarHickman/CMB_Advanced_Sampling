@@ -8,20 +8,23 @@ This is an active research project (differentiable, curved-sky, joint Bayesian C
 
 - **`ROADMAP.md`** — forward-looking only. The todo list of all outstanding work, in priority order, with a "Standing discipline" section of hard-won rules (precision, validation-before-production, claims hygiene). Check here first for "what's next."
 - **`achievements.md`** — condensed record of everything validated, closed-out, or fixed so far, including sampler routes that were tried and abandoned (with why, so they aren't retried without new evidence) and real bugs caught by validation. Check here before proposing an approach that might already be tried.
-- **`literature.md`** — annotated bibliography and the novelty/positioning argument (what's been done in the field, what hasn't, why the claim still holds). Check here before any framing/motivation writing.
+- **`literature.md`** — annotated bibliography and the novelty/positioning argument (what's been done in the field, what hasn't, why the claim still holds). Check here before any framing/motivation writing. Its standing claims-hygiene rule requires re-scanning arXiv **both** for curved-sky samplers/MUSE *and* for the generative/diffusion route before every submission milestone.
+- **`docs/notes/`** — longer-form research/design notes that would bloat the three docs above (currently the CMBLensing.jl benchmark design). Referenced from `ROADMAP.md` rather than duplicated into it.
 
 When asked to "continue the roadmap," read `ROADMAP.md`'s next unchecked item and `achievements.md`'s most recent entries for context on what's already been validated.
 
 ## Commands
 
 ```bash
-# Run all tests
+# Run all tests (use make, or the venv python explicitly -- the *system* python
+# lacks TF/healpy and silently degrades to ~69 skips plus spurious ImportError
+# failures that look like real breakage)
 make test
 # or
-PYTHONPATH=diffcmb pytest
+PYTHONPATH=diffcmb .venv/bin/python -m pytest -q
 
 # Run a single test file
-PYTHONPATH=diffcmb pytest tests/test_alm.py
+PYTHONPATH=diffcmb .venv/bin/python -m pytest tests/test_alm.py
 
 # Lint (ruff via pre-commit)
 make precommit
@@ -40,11 +43,12 @@ PYTHONPATH=diffcmb python Main.py
 
 ## Architecture
 
-The package lives in `diffcmb/diffcmb/` and is structured as a pipeline from raw cosmological parameters to MCMC samples, culminating in a 3-block Gibbs sampler over (alm, C_ℓ, φ):
+The package lives in `diffcmb/diffcmb/` and is structured as a pipeline from raw cosmological parameters to MCMC samples, culminating in a Gibbs sampler over (alm, C_ℓ, φ, and optionally C_L^φφ):
 
 ```
 CAMB params → power.py → alm_utils.py → model.py ─┬─ samplers.py (C_ℓ|alm exact, alm|C_ℓ,φ HMC)
-                                                    └─ lensing.py + sht_ducc.py (φ|alm,C_ℓ HMC)
+                                                    └─ lensing.py + sht_ducc.py (φ|alm,C_ℓ HMC,
+                                                                                  C_L^φφ|φ exact)
 ```
 
 The `diffcmb/rust_sph/` directory contains an optional Rust extension that parallelises spherical harmonic matrix construction using Rayon, providing significant speedups for large lmax. It is superseded for production-scale (lmax≳300) runs by the matrix-free ducc0 SHT path (`use_matrixfree_sht=True`, see below) — the dense matrix (Rust-accelerated or not) doesn't scale.
@@ -65,11 +69,11 @@ The `diffcmb/rust_sph/` directory contains an optional Rust extension that paral
 
 - **`sht_ducc.py`** — Matrix-free spherical harmonic transforms via ducc0, wrapped in `tf.custom_gradient` (a `tf.py_function` escape hatch, since ducc0 isn't TF-native). `HealpixSHT` (masked-sky synthesis, `nthreads` param) and `full_synthesis_tf` (full-sky synthesis — lensing needs this because deflected positions can fall outside the eventual mask). This is what makes lmax=300+ tractable at all: the dense SHT matrix doesn't fit in GPU memory and is ~500x slower per call.
 
-- **`lensing.py`** — The differentiable weak-lensing forward operator. `apply_lensing_tf`/`lens_map_tf` deflect an unlensed alm through φ to a lensed map; `psi_lensed` is the corresponding negative-log-posterior for the φ|alm,C_ℓ HMC block. Both branch on `model.use_matrixfree_sht`: `True` routes through `sht_ducc.py::full_synthesis_tf`; `False` uses the dense `model.sph_parts` Y-matrix. Only the full-sky matrix-free path is currently validated (see `achievements.md`) — masked-sky matrix-free lensing is untested.
+- **`lensing.py`** — The differentiable weak-lensing forward operator. `apply_lensing_tf`/`lens_map_tf` deflect an unlensed alm through φ to a lensed map; `psi_lensed` is the corresponding negative-log-posterior for the φ|alm,C_ℓ HMC block. Both branch on `model.use_matrixfree_sht`: `True` routes through `sht_ducc.py::full_synthesis_tf`; `False` uses the dense `model.sph_parts` Y-matrix. Both full-sky **and** masked-sky matrix-free paths are validated (see `achievements.md`; at nonzero φ the dense path is *not* a valid masked-sky reference, so that case is validated by finite differences on the matrix-free path itself). Also holds `estimate_phi_diag_fisher` (opt-in Fisher curvature for the φ mass matrix — implemented but closed as unfavorable, see `achievements.md`) and `compute_sl_phi_np`/`sample_cl_phiphi_given_phi` (the Block 4 exact C_L^φφ|φ inverse-Gamma draw, mirroring `model.py`'s Block 1 pair).
 
-- **`model.py`** — `CosmologyAdvancedSampling` is the central class. Its `__init__` runs the full setup pipeline (CAMB → alms → prior map → initial parameter vector `x0`), and accepts `use_matrixfree_sht=False, sht_nthreads=0` to select the SHT backend. TensorFlow-dependent tensors (`self.sph`, `self.shape`) are created **lazily** on the first call via `_ensure_tf_tensors()`, to allow importing without TF. `psi_tf` is the negative log-posterior for the unlensed alm|C_ℓ block. `compute_sl_np` computes the exact S_l = Σ_m |a_lm|² (with correct packed real/imag m=0-vs-m>0 weighting) that `sample_cl_given_alm`'s exact inverse-Gamma C_ℓ|alm conditional (`C_l|alm ~ InvGamma(l-0.5, S_l/2)`) is built on.
+- **`model.py`** — `CosmologyAdvancedSampling` is the central class. Its `__init__` runs the full setup pipeline (CAMB → alms → prior map → initial parameter vector `x0`), and accepts `use_matrixfree_sht=False, sht_nthreads=0` to select the SHT backend. Two opt-in realism kwargs follow the same "None = old behaviour, zero effect on existing call sites" pattern and are both validated against independent healpy/analytic ground truths: `beam_fwhm_arcmin=None` (Gaussian beam × HEALPix pixel window, a diagonal multiply on the unlensed alm, built by `power.py::beam_pixwin_transfer`) and `noise_map=None` (a length-NPIX per-pixel noise **sigma** array giving a spatially varying `self.Ninv = 1/noise_map**2` in place of the uniform `1/_noisesig**2`). TensorFlow-dependent tensors (`self.sph`, `self.shape`) are created **lazily** on the first call via `_ensure_tf_tensors()`, to allow importing without TF. `psi_tf` is the negative log-posterior for the unlensed alm|C_ℓ block. `compute_sl_np` computes the exact S_l = Σ_m |a_lm|² (with correct packed real/imag m=0-vs-m>0 weighting) that `sample_cl_given_alm`'s exact inverse-Gamma C_ℓ|alm conditional (`C_l|alm ~ InvGamma(l-0.5, S_l/2)`) is built on.
 
-- **`samplers.py`** — `run_chain_hmc`/`run_chain_nut` are thin wrappers around `tfp.mcmc.HamiltonianMonteCarlo`/`NoUTurnSampler` for single-block sampling. `run_gibbs_chain` is the production 3-block Gibbs driver: Block 1 (C_ℓ|alm) is an exact inverse-Gamma draw; Block 2 (alm|C_ℓ,φ) is HMC (or `alm_sampler='cg'`, closed as biased when a φ block is active — see `achievements.md`); Block 3 (φ|alm,C_ℓ), enabled by passing `cl_phiphi_full`, is HMC and requires `alm_sampler` in `('hmc','cg')`. Supports checkpointing (`checkpoint_path`/`checkpoint_every`) that resumes both alm- and phi-block state, needed because production lmax=300 chains run tens of seconds per sweep under a SLURM walltime.
+- **`samplers.py`** — `run_chain_hmc`/`run_chain_nut` are thin wrappers around `tfp.mcmc.HamiltonianMonteCarlo`/`NoUTurnSampler` for single-block sampling. `run_gibbs_chain` is the production Gibbs driver, up to 4 blocks: Block 1 (C_ℓ|alm) is an exact inverse-Gamma draw; Block 2 (alm|C_ℓ,φ) is HMC (or `alm_sampler='cg'`, closed as biased when a φ block is active — see `achievements.md`); Block 3 (φ|alm,C_ℓ), enabled by passing `cl_phiphi_full`, is HMC and requires `alm_sampler` in `('hmc','cg')`; Block 4 (C_L^φφ|φ), enabled by `sample_cl_phiphi=True` (requires Block 3), is another exact inverse-Gamma draw that resamples the φ power spectrum every sweep and rebuilds the φ mass matrix to match — it adds a `cl_phiphi_samples` array to the return tuple and is mutually exclusive with `phi_mass_matrix='fisher'`. Note the φ-block trajectory length (`phi_n_lfs`) is the parameter that actually controls φ mixing — see `achievements.md`'s leapfrog-schedule entry before tuning anything else. Supports checkpointing (`checkpoint_path`/`checkpoint_every`) that resumes alm-, phi-, and (when enabled) C_L^φφ state, needed because production lmax=300 chains run tens of seconds to minutes per sweep under a SLURM walltime.
 
 ### Dependency guards
 
