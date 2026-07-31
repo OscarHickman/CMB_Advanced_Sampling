@@ -932,6 +932,14 @@ def run_gibbs_chain(
             tf.constant(phi_current_np * phi_mass_sqrt_np, dtype=tf.float64)
         )
         phi_step_size_var = tf.Variable(phi_step_float, dtype=tf.float64)
+        # Mirrors mass_sqrt_var/lncl_var below: a tf.Variable twin of the
+        # plain-numpy cl_phiphi_full, so the phi-block log-prob target can be
+        # traced (see hmc_bootstrap_and_step) while Block 4's per-sweep
+        # spectrum update (Step 3a) still reaches it via .assign(), rather
+        # than the update being silently invisible to a graph that baked in
+        # the first sweep's value. The numpy cl_phiphi_full itself is left
+        # untouched — cl_phiphi_out/checkpointing still read it directly.
+        cl_phiphi_full_var = tf.Variable(tf.constant(cl_phiphi_full, dtype=tf.float64))
 
     # --- Sampler-specific setup ---
     if alm_sampler == 'hmc':
@@ -955,19 +963,39 @@ def run_gibbs_chain(
             step_size=step_size_var,
             num_leapfrog_steps=n_lfs,
         )
-        pkr = hmc_kernel.bootstrap_results(state_var)
+
+        # bootstrap_results must be called fresh every sweep (the Gibbs
+        # conditioning -- lncl_var/mass_sqrt_var, and phi_state_var/
+        # phi_mass_sqrt_var when sample_phi -- changes between blocks, so a
+        # cached kernel-results struct from a previous sweep would carry a
+        # stale target_log_prob), so it can't just run once before the loop.
+        # Combining it with one_step into a SINGLE @tf.function, traced once
+        # and reused every sweep, avoids calling bootstrap_results eagerly.
+        # Both psi_tf and (with sample_phi) psi_lensed's matrix-free-SHT/
+        # lensing escape hatches use tf.py_function, which in eager mode
+        # registers in TF's process-global eager py-function registry and is
+        # never freed; direct RSS measurement (achievements.md) confirmed
+        # this leaks ~1 MB per eager call at toy scale, and that a traced
+        # graph -- built once, reused every call -- does not leak. This
+        # combined, always-traced form replaces the previous split
+        # (bootstrap_results eager every sweep; one_step only @tf.function
+        # when not sample_phi), which existed because log_prob_phi_block's
+        # cl_phiphi_full argument used to be a plain numpy array that would
+        # have been silently baked into the trace as a constant -- see
+        # cl_phiphi_full_var above, which is what makes tracing safe here
+        # (and psi_lensed itself traces cleanly; verified directly, it was
+        # never actually untraceable, just never re-tried after the
+        # matrix-free SHT path added proper tf.py_function wrapping).
+        @tf.function
+        def hmc_bootstrap_and_step(state):
+            pkr = hmc_kernel.bootstrap_results(state)
+            return hmc_kernel.one_step(state, pkr)
 
         if sample_phi:
-            # lens_map_phi_diff_tf calls .numpy()/healpy inline each step (it
-            # recomputes bilinear geometry from the current phi), so it cannot
-            # be traced inside a tf.function graph — run this step eagerly.
-            def hmc_one_step(state, pkr):
-                return hmc_kernel.one_step(state, pkr)
-
             def phi_log_prob_whitened(u):
                 phi_packed = u / phi_mass_sqrt_var
                 full_params = tf.concat([lncl_var[2:], state_var / mass_sqrt_var], axis=0)
-                return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full)
+                return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
             phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
                 target_log_prob_fn=phi_log_prob_whitened,
@@ -975,12 +1003,10 @@ def run_gibbs_chain(
                 num_leapfrog_steps=phi_n_lfs,
             )
 
-            def phi_hmc_one_step(state, pkr):
-                return phi_hmc_kernel.one_step(state, pkr)
-        else:
             @tf.function
-            def hmc_one_step(state, pkr):
-                return hmc_kernel.one_step(state, pkr)
+            def phi_hmc_bootstrap_and_step(state):
+                pkr = phi_hmc_kernel.bootstrap_results(state)
+                return phi_hmc_kernel.one_step(state, pkr)
 
     else:  # 'cg' or 'messenger'
         model._ensure_tf_tensors()  # idempotent, no-op if already built
@@ -994,7 +1020,7 @@ def run_gibbs_chain(
             def phi_log_prob_whitened(u):
                 phi_packed = u / phi_mass_sqrt_var
                 full_params = tf.concat([cg_lncl_var[2:], cg_alm_var], axis=0)
-                return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full)
+                return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
             phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
                 target_log_prob_fn=phi_log_prob_whitened,
@@ -1002,7 +1028,9 @@ def run_gibbs_chain(
                 num_leapfrog_steps=phi_n_lfs,
             )
 
-            def phi_hmc_one_step(state, pkr):
+            @tf.function
+            def phi_hmc_bootstrap_and_step(state):
+                pkr = phi_hmc_kernel.bootstrap_results(state)
                 return phi_hmc_kernel.one_step(state, pkr)
 
     recent = []
@@ -1041,11 +1069,8 @@ def run_gibbs_chain(
             lncl_var.assign(
                 tf.constant(np.concatenate([np.zeros(2), new_lncl]), dtype=tf.float64)
             )
-            pkr = hmc_kernel.bootstrap_results(state_var)
-
-            new_state, new_pkr = hmc_one_step(state_var, pkr)
+            new_state, new_pkr = hmc_bootstrap_and_step(state_var)
             state_var.assign(new_state)
-            pkr = new_pkr
 
             accepted = bool(new_pkr.is_accepted.numpy())
             logp_val = float(-new_pkr.accepted_results.target_log_prob.numpy())
@@ -1113,17 +1138,18 @@ def run_gibbs_chain(
         # then rebuilds the phi HMC mass matrix and rescales the whitened
         # phi state to match -- mirroring exactly how new_lncl/mass_sqrt_np/
         # state_var are rebuilt for the alm block in Step 1/2 above.
-        # cl_phiphi_full is rebound here (not mutated in place); the
-        # phi_log_prob_whitened/phi_hmc_kernel closures above read it by name
-        # at call time (they run eagerly, never traced into a tf.function,
-        # because lens_map_phi_diff_tf's ducc0 call cannot be graph-traced),
-        # so this rebind is picked up by Step 3's HMC move below with no
-        # further wiring needed.
+        # cl_phiphi_full is rebound here (not mutated in place) for the
+        # numpy-side bookkeeping (cl_phiphi_out/checkpointing read it
+        # directly); cl_phiphi_full_var is separately .assign()-ed to the
+        # same new value so the *traced* phi_hmc_bootstrap_and_step sees the
+        # update too (a plain Python rebind is invisible to an already-traced
+        # graph, but a tf.Variable .assign() is read live at call time).
         if sample_cl_phiphi:
             phi_now_np = phi_state_var.numpy() / phi_mass_sqrt_np
             new_lncl_phiphi = sample_cl_phiphi_given_phi(phi_now_np, lmax, rng)
             cl_phiphi_full = cl_phiphi_full.copy()
             cl_phiphi_full[2:lmax] = np.exp(new_lncl_phiphi)
+            cl_phiphi_full_var.assign(tf.constant(cl_phiphi_full, dtype=tf.float64))
             new_phi_mass_sqrt = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
             phi_state_var.assign(tf.constant(phi_now_np * new_phi_mass_sqrt, dtype=tf.float64))
             phi_mass_sqrt_var.assign(tf.constant(new_phi_mass_sqrt, dtype=tf.float64))
@@ -1131,8 +1157,7 @@ def run_gibbs_chain(
 
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:
-            phi_pkr = phi_hmc_kernel.bootstrap_results(phi_state_var)
-            new_phi_state, new_phi_pkr = phi_hmc_one_step(phi_state_var, phi_pkr)
+            new_phi_state, new_phi_pkr = phi_hmc_bootstrap_and_step(phi_state_var)
             phi_state_var.assign(new_phi_state)
             phi_accepted = bool(new_phi_pkr.is_accepted.numpy())
 

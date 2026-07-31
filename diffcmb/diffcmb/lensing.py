@@ -918,7 +918,13 @@ def log_prob_phi_block(
         raise ImportError("tensorflow is required for log_prob_phi_block")
 
     lmax = model.lmax
-    cl_phiphi_tf = tf.constant(cl_phiphi_full, dtype=tf.float64)
+    # tf.convert_to_tensor (not tf.constant) so that passing a tf.Variable
+    # here — as samplers.py's traced HMC step does, so Block 4's per-sweep
+    # spectrum update is visible to the compiled graph rather than baked in
+    # at trace time — reads its current value at call time instead of
+    # freezing it. Identical behaviour to the old tf.constant for a plain
+    # numpy-array cl_phiphi_full (eager callers, existing tests).
+    cl_phiphi_tf = tf.cast(tf.convert_to_tensor(cl_phiphi_full), tf.float64)
 
     neg_log_lik = psi_lensed(model, params_tf, phi_packed_tf)
 
