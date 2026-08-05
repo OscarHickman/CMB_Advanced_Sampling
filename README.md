@@ -21,45 +21,40 @@ The codebase has since moved well past that scope, not just scaled it up:
 ## Project Structure
 
 ```
-diffcmb/diffcmb/
-├──                             # Python package
-│   ├── power.py                # CAMB power spectrum generation
-│   ├── alm.py                  # Noise map and single-pixel sph_harm
-│   ├── alm_utils.py            # All alm/map transforms (two index orderings)
-│   ├── tf_helpers.py           # TF weight tensor for psi3 term
-│   ├── model.py                # CosmologyAdvancedSampling class + psi_tf
-│   ├── samplers.py             # HMC, NUTS, Gibbs, and CG (exact) alm|C_l samplers
-│   ├── lensing.py              # Differentiable lensing operator (Phase 1)
-│   └── load_results.py         # Chain loading utilities
-└── rust_sph/                   # Rust extension (optional, recommended)
-    ├── spherical_harmonics.rs  # Holmes-Featherstone ALF recurrence (Rayon parallel)
-    ├── Cargo.toml
-    └── pyproject.toml
+diffcmb/diffcmb/                # Python package (see CLAUDE.md for module responsibilities)
+├── power.py                    # CAMB power spectrum generation
+├── alm.py                      # Noise map and single-pixel sph_harm
+├── alm_utils.py                # All alm/map transforms (two index orderings)
+├── tf_helpers.py                # TF weight tensor for psi3 term
+├── model.py                    # CosmologyAdvancedSampling class + psi_tf
+├── samplers.py                 # HMC/NUTS single-block wrappers + run_gibbs_chain (up to 4 blocks)
+├── lensing.py                  # Differentiable lensing operator + φ|alm,C_ℓ and C_L^φφ|φ blocks
+├── sht_ducc.py                 # Matrix-free spherical harmonic transforms (ducc0)
+├── messenger.py                # Messenger-field sampler (closed-out route, kept for reference)
+└── load_results.py             # Chain loading utilities
 
-scripts/                        # HPC entry points and diagnostics (see ROADMAP.md)
+rust_sph/                       # Rust extension (optional, recommended)
+├── spherical_harmonics.rs      # Holmes-Featherstone ALF recurrence (Rayon parallel)
+├── Cargo.toml
+└── pyproject.toml
+
+scripts/                        # HPC entry points and diagnostics — not unit tests (see CLAUDE.md)
 ├── run_sampler.py               # CLI driver for HMC/NUTS/Gibbs chains
-├── submit_*.slurm                # COSMA SLURM submission scripts
-├── analyze_chains.py             # R-hat / ESS / logp diagnostics
-├── debug_cg.py, debug_cg.slurm   # Full PCG convergence diagnostics (linearity/symmetry/PD checks)
-├── verify_cg_matvec.py, .slurm   # Cheap regression check for the CG matvec's cross-GPU gradient correctness (standalone; see tests/test_cg_matvec.py for the pytest version)
-└── benchmark_lensing.py, .slurm  # Forward/backward pass timing for the lensed likelihood (Phase 1)
+├── gate_*.py                    # One-off go/no-go checks before scaling a configuration
+├── debug_*.py                   # Investigation scripts from specific past bugs
+├── validate_*.py, smoke_*.py    # Production-scale validation and smoke runs
+├── coverage_ensemble_chain.py, aggregate_coverage_ranks.py  # SBC/coverage test harness
+├── analyze_*.py                 # R-hat / ESS / logp / correlation diagnostics
+└── submit_*.slurm, *.slurm      # COSMA SLURM wrappers (paired with the matching .py script)
 
-examples/
-├── basic_usage.ipynb           # Getting started: HMC + NUTS walkthrough
-├── further_investigation.ipynb # Large-lmax run on COSMA with convergence diagnostics
-└── analyze_hpc_results.ipynb   # Post-processing HPC chain output
+examples/                       # Getting-started and HPC-results notebooks
 
-tests/
-├── test_alm.py
-├── test_alm_utils.py
-├── test_cg_matvec.py            # CG matvec linearity/symmetry regression (cross-GPU gradient bug)
-├── test_lensing.py              # Phase 1 lensing operator gradient validation
-├── test_model.py
-├── test_power.py
-└── test_samplers.py
-
-archive/
-└── CMB_with_advanced_sampling_techniques.ipynb  # Original reference notebook
+tests/                          # Fast, deterministic pytest coverage at small lmax
+├── test_alm.py, test_alm_utils.py, test_power.py
+├── test_model.py, test_samplers.py, test_messenger.py
+├── test_lensing.py             # Lensing operator gradient validation
+├── test_sht_ducc.py, test_sht_ducc_model_integration.py
+└── test_cg_matvec.py           # CG matvec linearity/symmetry regression
 ```
 
 ## Installation
