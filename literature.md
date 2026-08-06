@@ -424,25 +424,31 @@ MUSE variants, and item (3) was missed until 2026-08-05 despite Flinch being nin
       referee complaint. **Highest priority item in this file.**
 - [ ] **Stop leading with the differentiable-SHT engineering.** Flinch makes curved-sky
       differentiability table stakes. Lead with the joint (C_ℓ, C_L^φφ) posterior.
-- [ ] **Evaluate MCLMC for the φ block.** Two independent reports (arXiv:2307.09504,
-      arXiv:2510.26691) say it beats HMC by 1–3 orders of magnitude at this dimensionality, on the
-      exact symptom blocking the critical path. `ROADMAP.md` currently names "raise `phi_n_lfs`"
-      as the next lever; the literature says the next lever is a different integrator. **Scope
-      this before spending more compute on longer HMC chains.** (Cost check first — a TFP→MCLMC
-      port is not free, and a converged HMC result beats a non-converged MCLMC one.)
-- [ ] **Fix the Carron & Lewis ID** — 1704.08230, not 1701.01712 — everywhere it propagates
-      (`.bib`, any draft, `docs/notes/`).
-- [ ] **Fix the 2209.10512 description** — it is geometry-agnostic MUSE methodology, not a
-      flat-sky MUSE follow-up. The "no curved-sky MUSE" conclusion is unchanged.
+- [ ] **Evaluate MCLMC for the φ block — IN PROGRESS, not yet triggered.** Two independent
+      reports (arXiv:2307.09504, arXiv:2510.26691) say it beats HMC by 1–3 orders of magnitude at
+      this dimensionality, on the exact symptom blocking the critical path. `ROADMAP.md`'s decision
+      rule (2026-08-06) says try the cheap `phi_n_lfs` lever first, bounded, and reserve the MCLMC
+      port for evidence of a geometry problem specifically. The deficit-vs-S/N plot above points at
+      under-mixing, not geometry, so the port is not triggered by that evidence alone. Job 11694912
+      (`phi_n_lfs` 80→240, launched 2026-08-06) is the bounded test of the cheap lever — see
+      `ROADMAP.md`'s "Currently doing" for how to read its result and what it implies for this item.
+- [x] **Fix the Carron & Lewis ID** — 1704.08230, not 1701.01712 — done 2026-08-06 at
+      `diffcmb/lensing.py:24` (the only live occurrence outside this file). Re-check before it
+      reaches a `.bib` or a draft.
+- [x] **Fix the 2209.10512 description** — checked 2026-08-06, no occurrences outside this file;
+      already correctly described here as geometry-agnostic MUSE methodology, not a flat-sky
+      MUSE follow-up.
 - [ ] **Read Modrák et al. (arXiv:2211.02383) before finalising the coverage-test design** — SBC
       sensitivity depends on the test quantity, and per-ℓ-bin φ-power is a non-innocent choice.
 - [ ] **Use rank-normalised split-R̂ and rank plots** (arXiv:1903.08008), not Gelman–Rubin 1992
       and trace plots, in the convergence section.
 - [ ] **Cite the corrected form of Cook, Gelman & Rubin 2006** (JCGS correction, 2017), not the
       original quantile statement.
-- [ ] **Produce the per-ℓ-bin φ-deficit-vs-S/N plot** — free, and it discriminates the two
-      literature-motivated hypotheses for the 51–86% deficit (Wiener-suppressed start vs
-      high-S/N sampler geometry).
+- [x] **Produce the per-ℓ-bin φ-deficit-vs-S/N plot** — done 2026-08-06
+      (`scripts/analyze_phi_deficit_vs_snr.py`, `results/analysis/phi_deficit_vs_snr_lmax300.png`).
+      Result: deficit decreases with S/N (Spearman ρ=-0.78) — the Wiener-suppressed-start/
+      under-mixing hypothesis, not high-S/N sampler geometry. See `ROADMAP.md`'s "Currently doing"
+      for the full write-up and its bearing on the sampler-lever decision.
 - [ ] **Add the three-sentence "what the deficit is not" paragraph** (not N0/N1, not mean-field,
       not non-Gaussian deflection, not foregrounds) to pre-empt referee questions.
 - [ ] **Cite Doeser & Jasche (arXiv:2606.10023) in the introduction** as the external, independent
