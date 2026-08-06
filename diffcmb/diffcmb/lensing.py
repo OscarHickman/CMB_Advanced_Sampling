@@ -21,7 +21,7 @@ Gradient strategy
              → dL/d(deflection field) [scatter to full sky]
              → dL/d(phi_alm)         [spin-1 SHT adjoint via hp.map2alm_spin]
 
-Reference: Lewis & Challinor 2006 (Phys. Rep. 429, 1); Carron & Lewis 2017 (arXiv:1701.01712).
+Reference: Lewis & Challinor 2006 (Phys. Rep. 429, 1); Carron & Lewis 2017 (arXiv:1704.08230).
 """
 
 import numpy as np

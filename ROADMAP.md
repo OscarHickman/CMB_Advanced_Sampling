@@ -2,72 +2,163 @@
 
 *Forward-looking plan only. Completed/closed-out work is in `achievements.md`; full detail in git history.*
 
-**The claim being built:** the first full-sky, curved-sky (HEALPix), differentiable joint Gibbs sampler over (alm_unlensed, C_ℓ, φ). Flat-sky joint sampling exists (CMBLensing.jl); full-sky methods are point-estimate or marginal (MUSE, QE). LiteBIRD-class delensing is structurally inaccessible to flat-sky codes. The window is finite (curved-sky MUSE could appear at any time) — the coverage test and the differentiator figures below are the critical path; everything else waits.
+**The claim:** the first full-sky, curved-sky (HEALPix), differentiable joint Gibbs sampler over (alm_unlensed, C_ℓ, φ). Flat-sky joint sampling exists (CMBLensing.jl); full-sky methods are point-estimate or marginal (MUSE, QE). The window is finite (curved-sky MUSE could appear at any time) — the coverage test and the differentiator figures are the critical path; everything else waits.
 
-**Why the scope is what it is.** A competing paradigm — diffusion/score-based generative lensing reconstruction — markets uncorrelated samples in ~0.2s and explicitly discards the two things this project spent its budget building (a differentiable forward model, and a sampler; see `literature.md`). That sets the bar for what this project's deliverables have to be:
+**Why this scope.** A competing paradigm — diffusion/score-based generative lensing reconstruction — markets uncorrelated samples in ~0.2s and discards the two things this project built: a differentiable forward model and a sampler (`literature.md`). That sets the bar:
 
-- **The product is *demonstrated* exactness, not asserted exactness.** "HMC targets the true posterior asymptotically" is worth nothing to a referee if the φ block's own autocorrelation is poor. A convincing coverage/rank test is the single highest-value remaining deliverable — higher than any additional scale. Run it where the chain can actually equilibrate (lmax≈100-150), not at lmax=300 where it currently cannot be shown to.
-- **The differentiator is the joint (C_ℓ, C_L^φφ) posterior with propagated correlations** — an object neither MUSE (marginal), QE (point estimate), Commander (lensing-blind), nor the diffusion route (learned, no C_ℓ block) produces at all.
-- **Position vs learned inference is offensive, not defensive.** An exact sampler is the natural reference standard against which amortised/learned posteriors are validated (the ANVIL/KARMA thesis: learned posteriors can be calibrated yet inaccurate). That framing is only as strong as the scale at which converged reference posteriors are actually produced — state that scale plainly rather than overclaiming.
-- **Deprioritised:** the CMBLensing.jl benchmark is a related-work obligation (cite published numbers, don't install Julia), not a science result; lmax scaling is not the route to impact and shouldn't consume budget before the coverage test lands.
+- The product is *demonstrated* exactness, not asserted exactness — a convincing coverage/rank test outranks any additional scale.
+- The differentiator is the joint (C_ℓ, C_L^φφ) posterior with propagated correlations — an object no competing method (MUSE, QE, Commander, diffusion) produces.
+- Position vs learned inference is offensive, not defensive: an exact sampler is the reference standard learned posteriors get validated against (ANVIL/KARMA thesis) — but only as strong as the scale actually demonstrated.
+- Deprioritised: CMBLensing.jl benchmark is a citation, not a science result; lmax scaling is not the route to impact.
+
+> **2026-08-06 amendment:** the claim above still stands, but the *framing* around it has changed and the window has shortened. Read the next section before writing any draft text or spending compute.
 
 ---
 
-## 1. Phase 2 — four-block Gibbs over (alm, C_ℓ, φ, C_L^φφ): the methods paper
+## 2026-08-06 — Literature response (rescan of 2026-08-05, `literature.md` 61 → ~360 lines)
 
-All four blocks are implemented and validated (`achievements.md`): C_ℓ|alm exact inverse-Gamma; alm|C_ℓ,φ HMC (the conditional is exactly Gaussian at fixed φ — HMC is a cost choice, and the paper must say so); φ|alm,C_ℓ HMC; C_L^φφ|φ exact inverse-Gamma (opt-in `sample_cl_phiphi=True`).
+`literature.md` is the authority; this section is only what the rescan changes about the *plan*.
 
-**Open point-validation caveat:** the lmax=300 simulation-validation run (`scripts/validate_sim_lmax300_lensing.py`, `phi_n_lfs=80`, post-memory-leak-fix) completed cleanly but recovered φ power systematically under-estimated by roughly half to seven-eighths across l=10-300 — not yet root-caused (see `achievements.md`). Per the standing discipline below, this is **not** being chased with further lmax=300 compute; it's carried as an open, demonstrated-scale caveat while effort focuses on the items below.
+### What survived, and what did not
 
-### Priority 1 — the exactness evidence (highest-value remaining work)
+**Survived:** no curved-sky joint (a_ℓm, C_ℓ, φ, C_L^φφ) sampler exists, and no curved-sky MUSE exists. This was confirmed by two direct arXiv API enumerations, not keyword search alone. Scoop risk on the headline: low.
 
-- [ ] **Multi-realization rank/coverage test at lmax≈100-150 — the headline validation.** ~O(10-20) independent simulated realizations, each a full 4-block chain warm-started away from truth, checking that the rank statistic of the true (alm, φ) fields is uniform within each posterior (Cook-Gelman-Rubin / simulation-based calibration), with interval coverage (not strict rank calibration — see `achievements.md` for why) for the spectra C_ℓ and C_L^φφ. Reuse `scripts/validate_sim_lmax300_lensing.py`'s structure (realized-power comparison via `compute_sl_np`, not the CAMB ensemble mean). Requires `sample_cl_phiphi=True`, which forces `phi_mass_matrix='prior'`. O(10-20) concurrent chains sits comfortably under the 200-job `durham`/`dine2` submission cap.
-  - Harness is written and smoke-tested end-to-end at lmax=24: `scripts/coverage_ensemble_chain.py` (one realization per SLURM array task), `scripts/aggregate_coverage_ranks.py` (offline rank pooling + KS uniformity), `scripts/submit_coverage_ensemble.slurm` (16-task array).
-  - **Blocked on the pilot chain returning GO and a `--thin` value from its measured lag-k autocorrelation.** A pilot at lmax=128 (data-driven MAP start, `phi_n_lfs=80`, 600 samples) came back NO-GO on the script's fixed lag-1 gate (worst 0.981 vs 0.90 threshold), but an offline extended lag-table analysis found the autocorrelation genuinely decays through zero by lag~75-100 in every l-bin — a slow-mixing-but-stationary signature, not a stuck one (contrast with the fully-stuck lmax=300 run's profile: lag-1/lag-5 >0.9999, no decay at any lag). Acting on that: a window-extension follow-up job resumed the same chain to 2500 samples via checkpoint. **Next step once that completes:** re-run the lag-k/drift analysis on the longer trace. If lag-1 still exceeds 0.90 but the decay-to-noise pattern holds and deepens, that's grounds for a judgment-call GO with `--thin` set from the measured decorrelation lag — document that decision explicitly here rather than silently overriding the script's verdict.
-  - **Gate rationale**: a rank/coverage test on a non-equilibrated chain produces confidently wrong uniformity plots (this project has been burned by that failure mode once already, see `achievements.md`). Hence one pilot chain, gated on direct lag-k autocorrelation (not any IAT/ESS estimator, both of which have separately misreported near-perfect mixing on stuck chains here), before funding the full ensemble.
+**Did not survive: differentiable curved-sky machinery as a contribution.** Flinch (arXiv:2510.26691, Oct 2025 — Crespi, Bonici, Loureiro, ..., **Millea & Seljak**) is a fully differentiable curved-sky field-level inference framework, validated on masked CMB temperature maps, recovering maps *and* angular power spectra. It has no φ block and no C_L^φφ block, so it occupies the *Commander cell* differentiably — the joint/lensed cell is still empty. But it makes differentiable SHTs under autodiff on the sphere **table stakes**, not a differentiator.
 
-### Priority 2 — the differentiator figures (what the paper is *for*; unblocked by Block 4)
+**The competitive landscape statement was incomplete.** Almanac (arXiv:2305.16134, Sellentin, Loureiro et al.) is an all-sky HMC over (map, C_ℓ) — full-sky, not Commander, not Gibbs, and previously uncited. "Commander is the other occupied cell" was wrong as written; Almanac and Flinch occupy it by different routes. Both must be cited and distinguished. Leaving Flinch uncited is now the single most likely "why didn't they cite X" referee complaint.
 
-- [ ] **The joint (C_ℓ^TT, C_L^φφ) posterior with its full correlation structure — as a figure.** The single object no competing method produces. Comes free from the Priority-1 pilot/ensemble chains (`sample_cl_phiphi=True` is all it needs). A one-chain test (`scripts/analyze_joint_posterior_pilot.py`) was inconclusive — underpowered, not negative (see `achievements.md`). **Next step**: re-run the analysis once the pilot's window-extension lands; the eventual ensemble's pooled traces are the fallback if still underpowered.
-- [ ] **Quantify what joint sampling buys over marginal methods (per-mode uncertainty propagation) — as a figure, not a sentence.**
-- [ ] **Quantify C_ℓ^TT bias reduction vs a lensing-blind Commander-style analysis of the same sims** — the "this changes an answer" result that turns a methods demo into a measurement claim.
-- [ ] **Write the position vs learned/amortised inference explicitly into the paper** (intro paragraph + a subsection): exactness, joint-posterior scope, no training set required — and the offensive framing that an exact sampler is the reference standard for validating learned posteriors (cite ANVIL/KARMA). Not optional; it's the most likely referee question. Basis: `literature.md`.
+### The re-pitch (use this language; it supersedes any earlier framing)
 
-### Priority 3 — related-work obligation (scope down; not a science result)
+**Lead with the object, not the machinery.**
 
-- [ ] **CMBLensing.jl benchmark — cite published numbers, do not install Julia.** Design notes: `docs/notes/cmblensing_benchmark_notes.md`. diffcmb's already-completed patch-scale gate (f_sky=0.016 ≈ 660 deg²) already matches CMBLensing.jl's own "BIG" config (650 deg², their reported practical ceiling for flat-sky HMC) — no patch redesign needed; direction is diffcmb full-sky sim → cut flat patch → compare. Proposed comparison set: C_ℓ^TT/C_ℓ^EE posterior recovery, C_L^φφ posterior recovery (headline plot), per-mode ESS/accept-rate table, wall-clock-per-effective-sample (computable from CMBLensing.jl's own published Table II — 19-50h/GPU, autocorr lengths 5-33 — without rerunning). CMBLensing.jl's f'-block CG is architecturally the *same* pattern diffcmb uses (phi drawn separately via HMC), not the CG-shortcut diffcmb rejected — state this explicitly to avoid an apparent (but false) contradiction. MUSE is confirmed marginal-only (no joint posterior).
-  - **Caveats to state plainly in the paper rather than paper over:** (a) T-only vs polarization-only — CMBLensing.jl's examples are all QU; diffcmb is T-only until Phase 3. (b) lmax mismatch — diffcmb's validated scale is lmax=300 vs their l<3500; frame as a methodology/mixing comparison, not an information-content one. Do not inflate diffcmb's lmax to force a match — scale is not the route to impact. (c) Their fiducial cosmology differs slightly from `LCDM_PARAMS` (tau/omega_b/omega_c) — note it as a small confound when citing.
+- **What the paper is:** the first curved-sky, full-sky posterior over the *joint* (a_ℓm, C_ℓ, φ, C_L^φφ) — in particular the joint (C_ℓ^TT, C_L^φφ) posterior with propagated correlations, an object no existing method produces. It is offered as a **reference standard**: the exact posterior that fast, marginal, or learned methods (QE, MUSE, Commander/Almanac/Flinch, diffusion) get validated against.
+- **What the paper must NOT claim as novel:** differentiable spherical-harmonic transforms, matrix-free SHTs under `tf.custom_gradient`, or "differentiable curved-sky inference" as such. Flinch published that. Present our differentiable infrastructure as *enabling machinery, consistent with Flinch*, in a methods subsection — never in the abstract's novelty sentence.
+- **Concrete intro framing (draft language, to be sharpened at writing time):**
+  > "Curved-sky differentiable field-level CMB inference is now established: Flinch (Crespi et al. 2025) demonstrates gradient propagation from masked full-sky temperature maps to cosmological parameters, and Almanac (Sellentin et al. 2023) samples all-sky maps jointly with their power spectra. What none of these frameworks includes is the lensing potential. Their posteriors are lensing-blind: they infer (map, C_ℓ) and, in Flinch's case, parameters, but carry no φ and no C_L^φφ block. Conversely, the methods that do treat lensing on the curved sky — quadratic estimators, iterative MAP reconstruction (Carron & Lewis 2017, arXiv:1704.08230), MUSE (Millea & Seljak 2022) — return point estimates or marginal constraints, not a joint posterior. This paper closes that cell: a full-sky, HEALPix, differentiable joint sampler over (a_ℓm, C_ℓ, φ, C_L^φφ), validated by simulation-based calibration, whose product is the joint (C_ℓ, C_L^φφ) posterior with its correlations propagated rather than assumed."
+- **Keep the offensive positioning intact** (it strengthens, not weakens, under Flinch): an exact sampler is what learned/amortised posteriors get validated against (Doeser & Jasche arXiv:2606.10023; ANVIL/KARMA calibrated-but-not-accurate verdict). Cite the honest scale limit in the same breath.
 
-## 2. The real-data run — end-to-end demonstration
+### Time pressure and scope discipline
 
-Both pre-conditions (beam+pixel window, anisotropic per-pixel noise) are done and validated (`achievements.md`), so this is now cheap once Phase 2 validates, but it's supporting evidence, not the paper's headline — the A_L anomaly that originally motivated it is no longer live (Planck PR4/NPIPE and ACT DR6 report it resolved). The honest pitch is one of: (a) **the A_L post-mortem** — a joint (alm, C_ℓ, φ) posterior on Planck 2018 vs PR4 maps showing where in the joint space the anomaly lived and how it dissolves; or (b) **internal-consistency machinery as the product** — the joint posterior as a principled lensing-consistency test for SO/LiteBIRD data, demonstrated on Planck.
+**Assessment.** The group with the strongest motive and the strongest infrastructure — Millea, Seljak, Bayer, Loureiro — is now **one block away**. Adding a φ block to Flinch is their natural next paper, and they have already published the sampler-efficiency tooling (MCLMC) that would make it work at scale. There is no evidence they are doing it, and no announced preprint; this is a motive-and-means assessment, not a report of a competing project.
 
-- [ ] Run the joint sampler on real Planck data; report the joint (C_ℓ, φ) posterior's internal lensing-consistency verdict.
+**Recommendation — minimum publishable unit (MPU).** Ship the *narrow* paper:
+
+1. Converged joint sampler on simulations at lmax ≈ 128;
+2. SBC rank/coverage evidence for (a_ℓm, φ) plus interval coverage for the spectra;
+3. The joint (C_ℓ^TT, C_L^φφ) posterior correlation figure;
+4. Related-work positioning vs Flinch / Almanac / MUSE / diffusion.
+
+Everything else is a follow-up. **Defer to a follow-up paper:** the real-data Planck run (§2 below), Phase 2b ΛCDM parameters, lmax scaling, and the per-mode uncertainty-propagation and Commander-style-bias figures *if* they are not falling out of the coverage chains for free. Rationale: the demonstrated-exactness result is what cannot be scooped by adding a block to someone else's framework; the real-data run can be added later without weakening it, and its original motivation (the A_L anomaly) is no longer live.
+
+**Explicit human decision required:** whether to accept a narrower paper at lmax ≈ 128 in exchange for speed, or to hold for a broader scope and accept scoop risk. This is a strategic/career judgement (venue expectations, supervisor's view), not something to decide from the literature alone.
+
+### Sampler-lever decision — re-opened (supersedes "raise `phi_n_lfs`")
+
+The current plan names raising `phi_n_lfs` as the next lever if the pilot chain does not equilibrate. Two independent groups now report **MCLMC beating HMC by 1–3 orders of magnitude** at exactly this dimensionality, on exactly this symptom: Bayer, Seljak & Modi (arXiv:2307.09504, >1 order at ~2.6×10⁵ dimensions, gap *widening* with dimension) and Flinch (arXiv:2510.26691, ~3 orders on curved-sky CMB maps). The literature says the next lever is a **different integrator**, not more leapfrog steps.
+
+| Option | Cost | Upside | Risk |
+|---|---|---|---|
+| Raise `phi_n_lfs` | Cheap, no new code; linear compute cost per sample | Known quantity; keeps the validated TFP/HMC stack and all dense-reference checks | May not fix it — if the pathology is geometry, more leapfrog steps buy proportionally little |
+| Port φ block to MCLMC | TFP → MCLMC port is **not free**: new integrator, new tuning, and the dense-reference discipline must be re-run from scratch | 1–3 orders of magnitude if the reports transfer; also a citable methods point aligned with the field's direction | Schedule risk during a shortening window; **a converged HMC result beats a non-converged MCLMC one, every time** |
+
+**Recommended decision rule (2026-08-06):**
+
+1. **Do not port yet.** First finish the extended lmax≈128 pilot and the free diagnostic below.
+2. **Try the cheap lever once, bounded.** If the pilot still fails its equilibration gate, raise `phi_n_lfs` by a factor of ~2–4 in *one* bounded run. Set the budget before launching.
+3. **Trigger the port only on evidence of a geometry problem, not a compute problem.** Justify the MCLMC port if *either*: (a) autocorrelation time scales roughly linearly or worse with `phi_n_lfs` — i.e. cost per effectively-independent sample does not improve, so more leapfrog steps are buying nothing; or (b) the projected wall-clock for the ~10–20-chain coverage ensemble under the best HMC configuration exceeds the schedule the MPU decision above sets.
+4. **If the port is triggered, scope it as a spike first** — φ block only, against the existing dense small-scale reference, with a hard abort if it does not clear that reference. Do not port the whole sampler.
+5. **Standing discipline still governs**: demonstrated beats asserted. If HMC converges at lmax≈128, ship it and put MCLMC in future work.
+
+**Explicit human decision required:** the `phi_n_lfs` budget in step 2 and the wall-clock threshold in step 3(b) are the user's to set — they depend on the submission target date.
+
+### The free discriminating test (do this early, it costs nothing)
+
+**Per-ℓ-bin φ-power deficit vs S/N plot**, from the existing lmax=300 outputs. The unexplained 51–86% φ-power deficit across ℓ=10–300 has no counterpart anywhere in the literature; what `literature.md` supplies is a ranked suspect list, and this one plot discriminates the top two:
+
+- **Deficit largest at LOW S/N** → consistent with suspect (1), **under-mixing retaining a Wiener-suppressed start** (Millea, Anderes & Wandelt arXiv:2002.00965 make parameterisation-driven catastrophic mixing failure their central result; a φ block started from a MAP/Wiener-filtered φ that has not equilibrated keeps its starting amplitude, and Wiener filtering suppresses exactly the low-S/N modes). **Implication:** the lmax=300 deficit and the lmax=128 pilot's lag-1 autocorrelation of 0.981 are the same phenomenon at two scales, it is not a separate open problem, and it dissolves under work already on the critical path. No new compute justified.
+- **Deficit largest at HIGH S/N** → consistent with the competing hypothesis, **sampler geometry**: Taylor, Ashdown & Hobson (arXiv:0708.2989) report HMC correlation lengths degrading specifically at the highest S/N. **Implication:** the mixing story is wrong, this is a real sampler-geometry problem, and it materially strengthens the case for the MCLMC port under rule 3 above.
+- **Flat / no S/N trend** → neither story explains it; escalate, and do not write the deficit off as mixing in the draft.
+
+**Ruled out by construction — say so in three sentences in the paper, don't spend compute:** N0/N1 and mean-field bias (a Gibbs sampler has no noise-bias subtraction step), non-Gaussian deflections (Gaussian-φ simulated input), foregrounds (foreground-free sims), and lensing-operator accuracy (validated to machine precision against the dense reference and `healpy`; standard set by Reinecke, Belkner & Carron arXiv:2304.10431).
+
+### Re-ranked critical path (2026-08-06)
+
+The shortened window does not change the critical path — it **hardens** it. Priority order:
+
+0. Per-ℓ-bin deficit-vs-S/N plot (free, discriminating, feeds the sampler decision).
+1. **lmax≈128 coverage/rank test** — unchanged as critical path, and now the highest-priority item in the project. It is the one result that cannot be pre-empted by someone adding a φ block to an existing framework, because it is evidence of *exactness*, not of capability.
+2. Joint (C_ℓ, C_L^φφ) differentiator figure.
+3. Manuscript (start now, in parallel — see below).
+
+---
+
+## Currently doing
+
+**Coverage-pilot equilibration chain, lmax=128 — extended run analyzed, still NO-GO.** The window-extension job (11665429, checkpointed to `pilot_coverage_lmax128_v2_ckpt.npz`) ran the chain out to the full 2500 samples; `scripts/reanalyze_pilot_checkpoint.py` re-checked it on 2026-08-06. Four of five l-bins decay cleanly. **The l=[60,100) bin did not resolve — it got worse with more samples**: lag-1 autocorrelation 0.996 (up from 0.981 at 1800 samples) and still doesn't drop under |r_k|<0.2 by lag 200 (every other bin crosses by lag 150). This is no longer ambiguous "slow decay vs stuck" territory for that one bin — it is the chain telling us more window alone won't fix it. Fixed lag-1 gate: NO-GO.
+
+**New evidence bearing on the next lever (2026-08-06): the free per-ℓ-bin φ-deficit-vs-S/N plot is done** (`scripts/analyze_phi_deficit_vs_snr.py`, `results/analysis/phi_deficit_vs_snr_lmax300.png`, post-processing the existing `validate_sim_lmax300_phi80.npz` posterior, no new MCMC). Result: **deficit decreases smoothly and monotonically with S/N** (Spearman ρ=-0.78 across 27 clean l-bins spanning l=20-300; one l=[10,20) bin excluded as an ill-conditioned single-realization cosmic-variance fluke in the truth draw, not a sampler signal — see script docstring). Deficit runs ~75-90% at S/N≈1.3 (l≈20-100) down to ~35% at S/N≈8 (l≈295). This matches the **under-mixing / Wiener-suppressed-start** hypothesis (Millea, Anderes & Wandelt arXiv:2002.00965), not the sampler-geometry one (Taylor, Ashdown & Hobson arXiv:0708.2989) — worst-mixing is at *low* S/N, same direction as the l=[60,100) pilot-bin pathology above. **Implication per the decision rule below: the lmax=300 deficit and the lmax=128 stuck bin are the same phenomenon at two scales; this is evidence for a compute/mixing problem, not a geometry problem, so rule 3's MCLMC trigger is NOT met by this plot alone.** Next lever stays "raise `phi_n_lfs`, bounded" (decision rule below), not an MCLMC spike — pending the human call on the `phi_n_lfs` budget.
+
+`scripts/pilot_coverage_equilibration.py` (run), `scripts/reanalyze_pilot_checkpoint.py` (re-check diagnostics from a checkpoint without re-running).
+
+## Todo, priority order
+
+### 0. Added 2026-08-06 — do these first (cheap, unblocking, or window-driven)
+- [x] **Per-ℓ-bin φ-deficit-vs-S/N plot** from the existing lmax=300 outputs — done, see "Currently doing" above. Verdict: under-mixing/Wiener-suppressed-start, not sampler geometry (ρ=-0.78). MCLMC not triggered by this evidence.
+- [ ] **Start the manuscript file.** No manuscript exists for this paper. With the window shortening, the draft should be growing alongside the chains, not after them. Create it with the sections whose content is already fixed and does not depend on pending results: intro/positioning (the re-pitch above), related work (Flinch, Almanac, MUSE, Commander line, diffusion answers), methods (blocks, differentiable operator — framed as enabling machinery, *not* as the novelty), and the "what the deficit is not" paragraph. Leave results/figures as placeholders.
+- [ ] **Cite Flinch (arXiv:2510.26691) and Almanac (arXiv:2305.16134)** in related work with the distinction stated explicitly: both are curved-sky (map, C_ℓ) samplers; neither has a φ or C_L^φφ block. Highest-priority citation item in `literature.md`.
+- [x] **Citation-hygiene audit across this repo** for the two IDs corrected on 2026-08-05 — done 2026-08-06:
+  - `arXiv:1701.01712` → `arXiv:1704.08230` fixed at `diffcmb/lensing.py:24`. No other occurrences outside `literature.md`.
+  - `arXiv:2209.10512` — no occurrences outside `literature.md`; already correctly described there.
+  - Re-run the grep before every submission milestone; both IDs are in `literature.md`'s claims-hygiene checklist.
+- [ ] **Sampler-lever decision** (see the trade-off table and decision rule above). Needs a human call on the `phi_n_lfs` budget and the wall-clock threshold that would trigger an MCLMC port.
+- [ ] **Scope decision on the minimum publishable unit** — narrow-and-fast at lmax≈128 vs broader scope with scoop risk. Human call; recommendation is narrow-and-fast, with the real-data run and Phase 2b deferred to a follow-up.
+
+### 1. Exactness evidence (highest value)
+- [ ] Multi-realization rank/coverage test at lmax≈100-150 (~10-20 independent chains, Cook-Gelman-Rubin rank uniformity for alm/φ, interval coverage for C_ℓ/C_L^φφ). Harness is built and smoke-tested (`scripts/coverage_ensemble_chain.py`, `scripts/aggregate_coverage_ranks.py`, `scripts/submit_coverage_ensemble.slurm`). **Blocked on the pilot chain above returning GO** and a `--thin` value from its measured autocorrelation.
+
+### 2. Differentiator figures (what the paper is *for*)
+- [ ] Joint (C_ℓ^TT, C_L^φφ) posterior correlation figure — falls out of the coverage chains for free (`sample_cl_phiphi=True`). A single-chain test so far is underpowered, not negative; needs a longer/pooled trace.
+- [ ] Per-mode uncertainty-propagation figure: what joint sampling buys over marginal methods.
+- [ ] C_ℓ^TT bias reduction vs a lensing-blind (Commander-style) analysis of the same sims.
+- [ ] Write the position vs learned/amortised inference into the paper explicitly (intro + subsection) — the most likely referee question.
+- [ ] *(2026-08-06)* Write the position vs **Flinch and Almanac** explicitly too — curved-sky differentiable/HMC (map, C_ℓ) inference now exists and is lensing-blind. This is a *second*, separate referee question from the learned-inference one, and the answer is the φ / C_L^φφ block. Draft language is in the 2026-08-06 re-pitch.
+- [ ] *(2026-08-06 scope note)* Under the recommended MPU, items 2.2 (per-mode uncertainty propagation) and 2.3 (C_ℓ^TT bias vs a lensing-blind analysis) stay **only if they fall out of the coverage chains cheaply**; otherwise they move to the follow-up. Item 2.1 (the joint correlation figure) is not optional — it is the paper's headline object.
+
+### 3. Related-work obligation (not a science result)
+- [ ] CMBLensing.jl benchmark write-up — cite their published numbers (Table II: 19-50h/GPU, autocorr lengths 5-33), don't install Julia. Design notes: `docs/notes/cmblensing_benchmark_notes.md`. State plainly: T-only vs their QU, lmax=300 vs their l<3500, small cosmology mismatch.
+
+## 2. Real-data run — end-to-end demonstration
+
+**2026-08-06: recommended for deferral to a follow-up paper.** Under the shortened window it is the largest piece of scope that can be removed without weakening the exactness claim, and its original motivation (the A_L anomaly) is no longer live. Human decision — see the scope-discipline item above.
+
+Cheap once Phase 2 validates; supporting evidence, not the headline (the A_L anomaly that motivated it is no longer live per Planck PR4/ACT DR6). Pitch as either an A_L post-mortem on Planck 2018 vs PR4, or the joint posterior as a lensing-consistency test for SO/LiteBIRD-class data.
+
+- [ ] Run the joint sampler on real Planck data; report the joint (C_ℓ, φ) posterior's lensing-consistency verdict.
 
 ## 3. Phase 3 — polarization / LiteBIRD delensing (the science paper)
 
-Full TQU joint analysis; the reason curved-sky matters at all. After Phase 2 submits. Target-experiment reference: the LiteBIRD lensing forecast (arXiv:2507.22618) — its pipeline is QE/iterative, so a sampling-based delensing result fills a real gap (see `literature.md`).
+Full TQU joint analysis, after Phase 2 submits. Target reference: LiteBIRD lensing forecast (arXiv:2507.22618, QE/iterative pipeline — a sampling-based result fills a real gap).
 
-- [ ] Spin-2 extension of alm utilities and the lensing operator (ducc0 spin-2 transforms — Phase 1.5 infrastructure carries over).
-- [ ] TQU joint likelihood with (TT, TE, EE, BB) block; C_ℓ^TE breaks inverse-Gamma conjugacy → 2×2 inverse-Wishart (BeyondPlanck structure) or HMC.
-- [ ] Simulated lensed TQU at LiteBIRD-like noise: delensing efficiency vs QE/iterative baselines; recovered r constraint.
+- [ ] Spin-2 extension of alm utilities and the lensing operator (ducc0 spin-2 transforms).
+- [ ] TQU joint likelihood (TT, TE, EE, BB); C_ℓ^TE breaks inverse-Gamma conjugacy → 2×2 inverse-Wishart or HMC.
+- [ ] Simulated lensed TQU at LiteBIRD-like noise: delensing efficiency vs QE/iterative baselines, recovered r constraint.
 
-## 4. Parked (do not start; recorded so the platform argument isn't lost)
+## Parked (not started; recorded so the platform argument isn't lost)
 
-- **Phase 2b — ΛCDM parameters from C_ℓ**: scientifically routine; a cheap robustness section *after* the Phase 2 paper submits.
-- **Phase 4 — lmax≥1000 scaling**: tuning, not rearchitecture, now the dense matrix is gone; profile only when Phase 2/3 need it.
-- **Phase 5 — non-Gaussian extensions** (fNL sampling, mask in-painting, learned priors, systematics blocks): each a separate paper after Phases 2-3.
-- **Lensed-operator exact Block-2 draw**: see `achievements.md`'s closed-routes section for why the current shortcut is rejected and what an alternative would need. Not worth pursuing unless HMC-on-both-blocks becomes a proven throughput bottleneck.
-- **Re-tune the matrix-free-HMC step-size adaptation**: the current adapted step-size regime (0.16, accept 0.55-0.65) mixes ~4x less efficiently per-sample than the old dense-SHT reference's (0.10-0.11, accept 0.6-0.82); recovering that would make the already-large (~31x) net throughput win even larger. Skip unless Phase 2 chains show it matters.
+- Phase 2b — ΛCDM parameters from C_ℓ: routine, a cheap robustness section after Phase 2 submits.
+- Phase 4 — lmax≥1000 scaling: tuning, not rearchitecture; profile only when Phase 2/3 need it.
+- Phase 5 — non-Gaussian extensions (fNL, mask in-painting, learned priors, systematics): separate papers after Phases 2-3.
+- Lensed-operator exact Block-2 draw: rejected shortcut, alternative unexplored (`achievements.md`). Not worth it unless HMC-on-both-blocks becomes a proven bottleneck.
+- Re-tune matrix-free-HMC step-size adaptation: current regime mixes ~4x less efficiently per-sample than the old dense-SHT reference; would enlarge the already-large (~31x) net throughput win. Skip unless Phase 2 chains show it matters.
 
 ## Standing discipline
 
-- **One critical path**: Phase 2 gates ✓ → **coverage/rank test at lmax≈128** → **joint-posterior differentiator figures** → paper. The lmax=300 point-validation run and the real-data demo are supporting evidence, not the critical path; scale is explicitly not the route to impact. Anything not on this waits.
-- **Demonstrated beats asserted.** Against a learned-inference competitor, "asymptotically exact" is only worth what the convergence evidence backs. Prefer a converged result at a smaller scale over a non-converged result at a larger one — every time, and say which one you have.
-- **Precision rule**: fp64 end-to-end unless a mixed scheme with fp64 accumulation is validated against fp64 chains (a float32 false-convergence trap is the standing counterexample, see `achievements.md`).
-- **Dense-reference discipline**: every new sampler/operator is validated against an exact small-scale reference before production — this has caught real bugs repeatedly (see `achievements.md`); don't skip it under time pressure.
-- **Claims hygiene**: every "first" carries scope qualifiers and nearest-prior-work citations (Millea+2020, MUSE, delensalot); re-check arXiv for curved-sky MUSE *and* the diffusion/generative route before every submission milestone (`literature.md`).
-- **R-hat on C_ℓ alone is not convergence** — chains drifting together from the same start fool it; check the alm block and tail-ESS trends too.
+- **One critical path**: Phase 2 gates ✓ → coverage/rank test at lmax≈128 → joint-posterior differentiator figures → paper. Anything not on this waits. *(2026-08-06: unchanged and hardened. The manuscript now runs in parallel rather than at the end — the window is short enough that "write it after" is itself a risk.)*
+- *(2026-08-06)* **Never lead with the differentiable machinery.** Flinch made curved-sky differentiability table stakes. Every abstract, talk, and intro leads with the joint (C_ℓ, C_L^φφ) posterior. Treat this as a hard drafting rule, not a preference.
+- *(2026-08-06)* **Watch authors, not only keywords.** Millea, Seljak, Bayer and Loureiro are the highest-probability source of a scoop; any φ or lensing extension of Flinch, Almanac, or CMBLensing.jl changes the plan. Add a named-author arXiv check to the pre-submission scan (`literature.md`, standing claims-hygiene rule, item 3).
+- **Demonstrated beats asserted.** Prefer a converged result at a smaller scale over a non-converged one at a larger scale — every time, and say which one you have.
+- **Precision**: fp64 end-to-end unless a mixed scheme is validated against fp64 chains (a float32 false-convergence trap is the standing counterexample).
+- **Dense-reference discipline**: validate every new sampler/operator against an exact small-scale reference before production — this has caught real bugs repeatedly.
+- **Claims hygiene**: every "first" carries scope qualifiers and nearest-prior-work citations; re-check arXiv for curved-sky MUSE and the diffusion/generative route before every submission milestone (`literature.md`).
+- **R-hat on C_ℓ alone is not convergence** — check the alm block and tail-ESS trends too.
 - On dine2/cosma8 reused nodes, scripts need a job-private `$TMPDIR` (autograph cache collision).
-- **`tf.gather` on a `tf.custom_gradient` output produces `IndexedSlices`, not a dense tensor**, as the upstream cotangent — any downstream `tf.py_function`/`.numpy()` call in that custom gradient's backward pass must `tf.convert_to_tensor()` it first. Applies to any future custom-gradient op fed into `tf.gather`/`tf.boolean_mask`.
-- **Eager-mode `tf.py_function` calls in a hot loop leak memory** (a documented TF footgun — each eager invocation registers a callback in TF's process-global eager py-function registry, never freed); wrap in `@tf.function` instead, tracing once and reusing the graph. Re-verify "X cannot be traced" assumptions against the current code before trusting them — infrastructure changes underneath them. If a value must reach a traced function and changes between calls (e.g. Block 4's resampled `cl_phiphi_full`), it must be a `tf.Variable` read via `tf.convert_to_tensor`/live reference, not a plain Python/numpy value closed over or passed raw — the latter gets silently baked into the trace as a constant.
