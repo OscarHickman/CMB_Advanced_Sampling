@@ -41,16 +41,25 @@
 
 **Assessment.** The group with the strongest motive and the strongest infrastructure — Millea, Seljak, Bayer, Loureiro — is now **one block away**. Adding a φ block to Flinch is their natural next paper, and they have already published the sampler-efficiency tooling (MCLMC) that would make it work at scale. There is no evidence they are doing it, and no announced preprint; this is a motive-and-means assessment, not a report of a competing project.
 
-**Recommendation — minimum publishable unit (MPU).** Ship the *narrow* paper:
+**Decision made (2026-08-06): broader scope, accepting the scoop risk.** The narrow MPU below was the speed-optimised recommendation; the user has explicitly chosen to hold for broader scope instead. This does not relax anything on the critical path — lmax≈128 coverage/rank test and the joint-posterior figure are still gate 1, unchanged and still first — it means the items previously slated for deferral are back **in scope for this paper**, not a follow-up:
+
+- The real-data Planck run (§2 below) — un-deferred.
+- Phase 2b ΛCDM parameters from C_ℓ — un-deferred, moved from "Parked" into the main scope once Phase 2 submits.
+- The per-mode uncertainty-propagation and C_ℓ^TT bias-vs-Commander figures (2.2/2.3 below) — no longer conditional on "falling out of the coverage chains cheaply"; back in as full scope items.
+- lmax scaling stays parked (tuning, not a scoop-relevant result) unless a specific reviewer/venue reason emerges.
+
+Consequence to watch, not yet acted on: broader scope means more wall-clock between now and submission, which is the exact axis the scoop-risk assessment above is about (Millea/Seljak/Bayer/Loureiro, "one block away"). No new mitigation is proposed here beyond the standing discipline (watch named authors on arXiv, re-run the claims-hygiene scan before submission) — worth revisiting if a competing preprint actually appears.
+
+The original narrow-MPU recommendation is kept below for the record, since it's still the fallback if schedule pressure reasserts itself.
+
+**Original recommendation — minimum publishable unit (MPU), superseded by the decision above.** Ship the *narrow* paper:
 
 1. Converged joint sampler on simulations at lmax ≈ 128;
 2. SBC rank/coverage evidence for (a_ℓm, φ) plus interval coverage for the spectra;
 3. The joint (C_ℓ^TT, C_L^φφ) posterior correlation figure;
 4. Related-work positioning vs Flinch / Almanac / MUSE / diffusion.
 
-Everything else is a follow-up. **Defer to a follow-up paper:** the real-data Planck run (§2 below), Phase 2b ΛCDM parameters, lmax scaling, and the per-mode uncertainty-propagation and Commander-style-bias figures *if* they are not falling out of the coverage chains for free. Rationale: the demonstrated-exactness result is what cannot be scooped by adding a block to someone else's framework; the real-data run can be added later without weakening it, and its original motivation (the A_L anomaly) is no longer live.
-
-**Explicit human decision required:** whether to accept a narrower paper at lmax ≈ 128 in exchange for speed, or to hold for a broader scope and accept scoop risk. This is a strategic/career judgement (venue expectations, supervisor's view), not something to decide from the literature alone.
+Everything else was proposed as a follow-up (real-data Planck run, Phase 2b ΛCDM parameters, lmax scaling, per-mode uncertainty-propagation and Commander-style-bias figures) if not falling out of the coverage chains for free. Superseded — see the decision above.
 
 ### Sampler-lever decision — re-opened (supersedes "raise `phi_n_lfs`")
 
@@ -111,7 +120,7 @@ The shortened window does not change the critical path — it **hardens** it. Pr
   - `arXiv:2209.10512` — no occurrences outside `literature.md`; already correctly described there.
   - Re-run the grep before every submission milestone; both IDs are in `literature.md`'s claims-hygiene checklist.
 - [ ] **Sampler-lever decision** (see the trade-off table and decision rule above). Needs a human call on the `phi_n_lfs` budget and the wall-clock threshold that would trigger an MCLMC port.
-- [ ] **Scope decision on the minimum publishable unit** — narrow-and-fast at lmax≈128 vs broader scope with scoop risk. Human call; recommendation is narrow-and-fast, with the real-data run and Phase 2b deferred to a follow-up.
+- [x] **Scope decision on the minimum publishable unit — decided 2026-08-06: broader scope, accepting scoop risk.** Real-data run and Phase 2b are back in scope for this paper (see the "Decision made" note under Time pressure and scope discipline above), not deferred.
 
 ### 1. Exactness evidence (highest value)
 - [ ] Multi-realization rank/coverage test at lmax≈100-150 (~10-20 independent chains, Cook-Gelman-Rubin rank uniformity for alm/φ, interval coverage for C_ℓ/C_L^φφ). Harness is built and smoke-tested (`scripts/coverage_ensemble_chain.py`, `scripts/aggregate_coverage_ranks.py`, `scripts/submit_coverage_ensemble.slurm`). **Blocked on the pilot chain above returning GO** and a `--thin` value from its measured autocorrelation.
@@ -122,18 +131,22 @@ The shortened window does not change the critical path — it **hardens** it. Pr
 - [ ] C_ℓ^TT bias reduction vs a lensing-blind (Commander-style) analysis of the same sims.
 - [ ] Write the position vs learned/amortised inference into the paper explicitly (intro + subsection) — the most likely referee question.
 - [ ] *(2026-08-06)* Write the position vs **Flinch and Almanac** explicitly too — curved-sky differentiable/HMC (map, C_ℓ) inference now exists and is lensing-blind. This is a *second*, separate referee question from the learned-inference one, and the answer is the φ / C_L^φφ block. Draft language is in the 2026-08-06 re-pitch.
-- [ ] *(2026-08-06 scope note)* Under the recommended MPU, items 2.2 (per-mode uncertainty propagation) and 2.3 (C_ℓ^TT bias vs a lensing-blind analysis) stay **only if they fall out of the coverage chains cheaply**; otherwise they move to the follow-up. Item 2.1 (the joint correlation figure) is not optional — it is the paper's headline object.
+- [ ] *(2026-08-06 scope note, superseded)* The original MPU recommendation made items 2.2/2.3 conditional on falling out of the coverage chains cheaply. Superseded by the broader-scope decision above — 2.2 and 2.3 are full scope items now, not conditional. Item 2.1 (the joint correlation figure) remains the paper's headline object regardless.
 
 ### 3. Related-work obligation (not a science result)
 - [ ] CMBLensing.jl benchmark write-up — cite their published numbers (Table II: 19-50h/GPU, autocorr lengths 5-33), don't install Julia. Design notes: `docs/notes/cmblensing_benchmark_notes.md`. State plainly: T-only vs their QU, lmax=300 vs their l<3500, small cosmology mismatch.
 
 ## 2. Real-data run — end-to-end demonstration
 
-**2026-08-06: recommended for deferral to a follow-up paper.** Under the shortened window it is the largest piece of scope that can be removed without weakening the exactness claim, and its original motivation (the A_L anomaly) is no longer live. Human decision — see the scope-discipline item above.
-
-Cheap once Phase 2 validates; supporting evidence, not the headline (the A_L anomaly that motivated it is no longer live per Planck PR4/ACT DR6). Pitch as either an A_L post-mortem on Planck 2018 vs PR4, or the joint posterior as a lensing-consistency test for SO/LiteBIRD-class data.
+**2026-08-06: in scope for this paper** (the broader-scope decision above un-defers this — it is no longer pushed to a follow-up). Supporting evidence, not the headline (the A_L anomaly that originally motivated it is no longer live per Planck PR4/ACT DR6, so it still isn't the *reason* to run it). Pitch as either an A_L post-mortem on Planck 2018 vs PR4, or the joint posterior as a lensing-consistency test for SO/LiteBIRD-class data. Sequenced after the lmax≈128 coverage/rank test and joint-posterior figure — those stay gate 1 regardless of scope.
 
 - [ ] Run the joint sampler on real Planck data; report the joint (C_ℓ, φ) posterior's lensing-consistency verdict.
+
+## 2b. Phase 2b — ΛCDM parameters from C_ℓ
+
+**2026-08-06: in scope for this paper** (un-deferred from Parked by the broader-scope decision above). Routine, a cheap robustness section — derive standard ΛCDM parameter constraints from the posterior C_ℓ chains once Phase 2's coverage/rank test and joint-posterior figure are done. Sequenced after those, not before.
+
+- [ ] Parameter-inference pass on the posterior C_ℓ^TT chains from the lmax≈128 (and, if run, real-data) chains; report against Planck/ACT/SPT baselines.
 
 ## 3. Phase 3 — polarization / LiteBIRD delensing (the science paper)
 
@@ -145,7 +158,6 @@ Full TQU joint analysis, after Phase 2 submits. Target reference: LiteBIRD lensi
 
 ## Parked (not started; recorded so the platform argument isn't lost)
 
-- Phase 2b — ΛCDM parameters from C_ℓ: routine, a cheap robustness section after Phase 2 submits.
 - Phase 4 — lmax≥1000 scaling: tuning, not rearchitecture; profile only when Phase 2/3 need it.
 - Phase 5 — non-Gaussian extensions (fNL, mask in-painting, learned priors, systematics): separate papers after Phases 2-3.
 - Lensed-operator exact Block-2 draw: rejected shortcut, alternative unexplored (`achievements.md`). Not worth it unless HMC-on-both-blocks becomes a proven bottleneck.
