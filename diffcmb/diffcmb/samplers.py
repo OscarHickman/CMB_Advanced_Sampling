@@ -699,6 +699,34 @@ def build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L):
     return mass_sqrt
 
 
+def build_phi_mclmc_step(phi_log_prob_whitened, phi_step_size_var, phi_mclmc_l, phi_n_lfs):
+    """Build the traced Block-3 MCLMC per-sweep step closure.
+
+    Mirrors ``phi_hmc_bootstrap_and_step``'s single-@tf.function-per-sweep
+    contract (mclmc.py's eager tf.py_function memory-leak note): the whole
+    trajectory -- gradient evaluations and all -- is traced once and reused
+    every sweep, not called eagerly. ``phi_log_prob_whitened`` is the same
+    closure the HMC path already builds (over lncl_var/state_var or
+    cg_lncl_var/cg_alm_var, depending on alm_sampler); only the integrator
+    driving Block 3 changes here, not the target itself.
+    """
+    from .mclmc import mclmc_trajectory
+
+    def phi_grad_fn(u):
+        with tf.GradientTape() as tape:
+            tape.watch(u)
+            lp = phi_log_prob_whitened(u)
+        return lp, tape.gradient(lp, u)
+
+    @tf.function
+    def phi_mclmc_bootstrap_and_step(state, velocity):
+        return mclmc_trajectory(
+            state, velocity, phi_grad_fn, phi_step_size_var, phi_mclmc_l, phi_n_lfs
+        )
+
+    return phi_mclmc_bootstrap_and_step
+
+
 def run_gibbs_chain(
     model,
     n_samples=1000,
@@ -724,6 +752,8 @@ def run_gibbs_chain(
     phi_fisher_warmup_iter=20,
     phi_fisher_n_probes=8,
     sample_cl_phiphi=False,
+    phi_sampler='hmc',
+    phi_mclmc_L=1.0,
 ):
     """Gibbs sampler alternating exact C_l | alm (inverse-Gamma) + alm | C_l steps.
 
@@ -788,6 +818,21 @@ def run_gibbs_chain(
     at burn-in and frozen thereafter, and combining that with a spectrum that
     keeps changing every sweep would need its own validation this change does
     not attempt.
+
+    `phi_sampler` (opt-in, default 'hmc', requires `cl_phiphi_full` to also be
+    given): selects the Block 3 integrator. 'hmc' is the validated production
+    path (unchanged). 'mclmc' is a spike (ROADMAP.md, 2026-08-07) -- a hand
+    -implemented microcanonical Langevin integrator (Robnik, De Luca,
+    Silverstein & Seljak arXiv:2212.08549; see mclmc.py) that reuses the same
+    `log_prob_phi_block` target and gradient unchanged, driven by `phi_n_lfs`
+    (trajectory length, same meaning as for HMC) and `phi_mclmc_L` (momentum
+    decoherence scale). MCLMC is unadjusted (no Metropolis-Hastings step) --
+    `phi_hmc_step_size` is used as a FIXED step size (no Robbins-Monro
+    adaptation; this is a bounded spike, not a new adaptive scheme), and
+    `phi_accepts_out`/checkpointing's accept-rate bookkeeping is repurposed to
+    track "trajectory did not diverge" instead of an M-H accept. Requires
+    `phi_mass_matrix='prior'` (the 'fisher' variant is untested with this
+    integrator and out of the spike's scope).
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
@@ -806,6 +851,16 @@ def run_gibbs_chain(
             "phi_mass_matrix='fisher' -- the Fisher-informed mass matrix is "
             "estimated once at burn-in and frozen thereafter, which would be "
             "inconsistent with a spectrum that keeps changing every sweep"
+        )
+    if phi_sampler not in ('hmc', 'mclmc'):
+        raise ValueError(f"phi_sampler must be 'hmc' or 'mclmc', got {phi_sampler!r}")
+    if phi_sampler == 'mclmc' and not sample_phi:
+        raise ValueError("phi_sampler='mclmc' requires cl_phiphi_full (Block 3) to be given")
+    if phi_sampler == 'mclmc' and phi_mass_matrix == 'fisher':
+        raise ValueError(
+            "phi_sampler='mclmc' is not validated together with "
+            "phi_mass_matrix='fisher' -- out of the bounded spike's scope "
+            "(ROADMAP.md, 2026-08-07); use phi_mass_matrix='prior'"
         )
     # alm_sampler='cg' + sample_phi is the Phase 2 gate-2 exactness experiment
     # (ROADMAP.md Section 1): Block 2 draws an exact Gaussian alm sample against
@@ -848,6 +903,8 @@ def run_gibbs_chain(
             phi_accepts_out = list(ckpt["phi_accepts"].tolist())
             phi_current_np = ckpt["phi_state"].copy()
             phi_step_float = float(ckpt["phi_step_size"])
+            if phi_sampler == 'mclmc':
+                phi_velocity_np = ckpt["phi_velocity"].copy()
         if sample_cl_phiphi:
             # "cl_phiphi_state"/"cl_phiphi_samples" are only present in
             # checkpoints written by a sample_cl_phiphi=True run -- fall back
@@ -877,6 +934,9 @@ def run_gibbs_chain(
                 if phi_initial is not None
                 else np.zeros(n_phi, dtype=np.float64)
             )
+            if phi_sampler == 'mclmc':
+                _v0 = rng.standard_normal(n_phi)
+                phi_velocity_np = _v0 / np.linalg.norm(_v0)
         if sample_cl_phiphi:
             # Local mutable working copy -- resampled every sweep from here
             # on, never mutating the caller's original array.
@@ -940,6 +1000,11 @@ def run_gibbs_chain(
         # the first sweep's value. The numpy cl_phiphi_full itself is left
         # untouched — cl_phiphi_out/checkpointing still read it directly.
         cl_phiphi_full_var = tf.Variable(tf.constant(cl_phiphi_full, dtype=tf.float64))
+        if phi_sampler == 'mclmc':
+            # MCLMC's velocity carries information between sweeps (unlike
+            # HMC's momentum, which TFP refreshes internally every call), so
+            # it must be a persistent Variable, not local trajectory state.
+            phi_velocity_var = tf.Variable(tf.constant(phi_velocity_np, dtype=tf.float64))
 
     # --- Sampler-specific setup ---
     if alm_sampler == 'hmc':
@@ -997,16 +1062,21 @@ def run_gibbs_chain(
                 full_params = tf.concat([lncl_var[2:], state_var / mass_sqrt_var], axis=0)
                 return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
-            phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
-                target_log_prob_fn=phi_log_prob_whitened,
-                step_size=phi_step_size_var,
-                num_leapfrog_steps=phi_n_lfs,
-            )
+            if phi_sampler == 'mclmc':
+                phi_mclmc_bootstrap_and_step = build_phi_mclmc_step(
+                    phi_log_prob_whitened, phi_step_size_var, phi_mclmc_L, phi_n_lfs
+                )
+            else:
+                phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
+                    target_log_prob_fn=phi_log_prob_whitened,
+                    step_size=phi_step_size_var,
+                    num_leapfrog_steps=phi_n_lfs,
+                )
 
-            @tf.function
-            def phi_hmc_bootstrap_and_step(state):
-                pkr = phi_hmc_kernel.bootstrap_results(state)
-                return phi_hmc_kernel.one_step(state, pkr)
+                @tf.function
+                def phi_hmc_bootstrap_and_step(state):
+                    pkr = phi_hmc_kernel.bootstrap_results(state)
+                    return phi_hmc_kernel.one_step(state, pkr)
 
     else:  # 'cg' or 'messenger'
         model._ensure_tf_tensors()  # idempotent, no-op if already built
@@ -1022,16 +1092,21 @@ def run_gibbs_chain(
                 full_params = tf.concat([cg_lncl_var[2:], cg_alm_var], axis=0)
                 return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
-            phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
-                target_log_prob_fn=phi_log_prob_whitened,
-                step_size=phi_step_size_var,
-                num_leapfrog_steps=phi_n_lfs,
-            )
+            if phi_sampler == 'mclmc':
+                phi_mclmc_bootstrap_and_step = build_phi_mclmc_step(
+                    phi_log_prob_whitened, phi_step_size_var, phi_mclmc_L, phi_n_lfs
+                )
+            else:
+                phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
+                    target_log_prob_fn=phi_log_prob_whitened,
+                    step_size=phi_step_size_var,
+                    num_leapfrog_steps=phi_n_lfs,
+                )
 
-            @tf.function
-            def phi_hmc_bootstrap_and_step(state):
-                pkr = phi_hmc_kernel.bootstrap_results(state)
-                return phi_hmc_kernel.one_step(state, pkr)
+                @tf.function
+                def phi_hmc_bootstrap_and_step(state):
+                    pkr = phi_hmc_kernel.bootstrap_results(state)
+                    return phi_hmc_kernel.one_step(state, pkr)
 
     recent = []
     resume_tag = "resuming, " if resuming else ""
@@ -1157,15 +1232,31 @@ def run_gibbs_chain(
 
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:
-            new_phi_state, new_phi_pkr = phi_hmc_bootstrap_and_step(phi_state_var)
-            phi_state_var.assign(new_phi_state)
-            phi_accepted = bool(new_phi_pkr.is_accepted.numpy())
+            if phi_sampler == 'mclmc':
+                new_phi_state, new_phi_velocity, mclmc_diag = phi_mclmc_bootstrap_and_step(
+                    phi_state_var, phi_velocity_var
+                )
+                phi_state_var.assign(new_phi_state)
+                phi_velocity_var.assign(new_phi_velocity)
+                # MCLMC is unadjusted (no M-H accept/reject) -- repurpose the
+                # existing accept-rate bookkeeping/checkpointing plumbing to
+                # track "trajectory did not diverge" instead, so downstream
+                # code (mean accept-rate logging, phi_accepts_out) needs no
+                # further changes. Step size is intentionally NOT adapted
+                # here (fixed at phi_hmc_step_size) -- see phi_sampler
+                # docstring above: this is a bounded spike, not a new
+                # adaptive scheme.
+                phi_accepted = not bool(mclmc_diag.diverged.numpy())
+            else:
+                new_phi_state, new_phi_pkr = phi_hmc_bootstrap_and_step(phi_state_var)
+                phi_state_var.assign(new_phi_state)
+                phi_accepted = bool(new_phi_pkr.is_accepted.numpy())
 
-            if is_burnin:
-                gamma = 1.0 / ((i + 1) ** 0.6)
-                log_step = np.log(phi_step_float) + gamma * (float(phi_accepted) - phi_target_accept)
-                phi_step_float = float(np.clip(np.exp(log_step), 1e-7, 2.0))
-                phi_step_size_var.assign(phi_step_float)
+                if is_burnin:
+                    gamma = 1.0 / ((i + 1) ** 0.6)
+                    log_step = np.log(phi_step_float) + gamma * (float(phi_accepted) - phi_target_accept)
+                    phi_step_float = float(np.clip(np.exp(log_step), 1e-7, 2.0))
+                    phi_step_size_var.assign(phi_step_float)
 
         if i % 200 == 0:
             rate_str = f"{np.mean(recent[-100:]):.2f}" if len(recent) >= 100 else "n/a"
@@ -1202,6 +1293,8 @@ def run_gibbs_chain(
                         phi_state=phi_sample.astype(np.float64),
                         phi_step_size=np.float64(phi_step_float),
                     )
+                    if phi_sampler == 'mclmc':
+                        ckpt_kwargs.update(phi_velocity=phi_velocity_var.numpy().astype(np.float64))
                 if sample_cl_phiphi:
                     ckpt_kwargs.update(
                         cl_phiphi_samples=np.array(cl_phiphi_out, dtype=np.float64),

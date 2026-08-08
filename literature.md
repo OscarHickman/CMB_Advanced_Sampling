@@ -424,14 +424,16 @@ MUSE variants, and item (3) was missed until 2026-08-05 despite Flinch being nin
       referee complaint. **Highest priority item in this file.**
 - [ ] **Stop leading with the differentiable-SHT engineering.** Flinch makes curved-sky
       differentiability table stakes. Lead with the joint (C_ℓ, C_L^φφ) posterior.
-- [ ] **Evaluate MCLMC for the φ block — IN PROGRESS, not yet triggered.** Two independent
-      reports (arXiv:2307.09504, arXiv:2510.26691) say it beats HMC by 1–3 orders of magnitude at
-      this dimensionality, on the exact symptom blocking the critical path. `ROADMAP.md`'s decision
-      rule (2026-08-06) says try the cheap `phi_n_lfs` lever first, bounded, and reserve the MCLMC
-      port for evidence of a geometry problem specifically. The deficit-vs-S/N plot above points at
-      under-mixing, not geometry, so the port is not triggered by that evidence alone. Job 11694912
-      (`phi_n_lfs` 80→240, launched 2026-08-06) is the bounded test of the cheap lever — see
-      `ROADMAP.md`'s "Currently doing" for how to read its result and what it implies for this item.
+- [ ] **Evaluate MCLMC for the φ block — TRIGGERED 2026-08-07, spike implemented and mid-decision
+      2026-08-08.** Job 11694912 (`phi_n_lfs` 80→240) came back NO-GO with near-zero improvement
+      despite 3x compute — evidence for a geometry problem, not just under-mixing (contradicting
+      the deficit-vs-S/N plot's direction), which triggered the port per `ROADMAP.md`'s decision
+      rule. Hand-implemented directly in TF (`diffcmb/mclmc.py`, no JAX/blackjax dependency — see
+      `ROADMAP.md` for why), unit-validated, and grid-tuned at small lmax=20: the best config beat
+      HMC's ESS/wall-clock-second on 4/6 probed l-bins with a clean bias check, confirming the
+      1–3-orders-of-magnitude reports transfer at least partially at this dimensionality. Deciding
+      run at the actual lmax≈128 pilot scale/problem bin is in flight — see `ROADMAP.md`'s
+      "Currently doing" for live status and the GO/NO-GO procedure.
 - [x] **Fix the Carron & Lewis ID** — 1704.08230, not 1701.01712 — done 2026-08-06 at
       `diffcmb/lensing.py:24` (the only live occurrence outside this file). Re-check before it
       reaches a `.bib` or a draft.
