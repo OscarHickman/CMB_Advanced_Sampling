@@ -67,8 +67,12 @@ The cost-scaling measurement the ROADMAP asks for falls out of the same run:
 seconds/sweep is reported and saved, which is what sizes the ensemble.
 
 Usage: PYTHONPATH=diffcmb .venv/bin/python scripts/pilot_coverage_equilibration.py \
-    --lmax 128 --nside 128 --n_burnin 400 --n_samples 600 --phi_n_lfs 80 \
-    --map_steps 500 --checkpoint_path results/analysis/pilot_coverage_lmax128_v2_ckpt.npz
+    --lmax 128 --nside 128 --n_burnin 400 --n_samples 600 \
+    --map_steps 500 --checkpoint_path results/analysis/pilot_coverage_lmax128_mclmc_ckpt.npz
+
+Block 3 defaults to phi_sampler='mclmc' (2026-08-08, gate job 11708844 GO --
+see achievements.md). Pass --phi_sampler hmc --phi_hmc_step_size 0.05
+--phi_n_lfs 240 to fall back to the retired HMC path.
 """
 import argparse
 import time
@@ -238,8 +242,21 @@ def main():
     p.add_argument("--map_lr", type=float, default=0.01)
     p.add_argument("--hmc_step_size", type=float, default=0.01)
     p.add_argument("--n_lfs", type=int, default=10)
-    p.add_argument("--phi_hmc_step_size", type=float, default=0.001)
-    p.add_argument("--phi_n_lfs", type=int, default=80)
+    p.add_argument("--phi_hmc_step_size", type=float, default=0.1,
+                   help="also the MCLMC step_size when --phi_sampler=mclmc; "
+                        "0.1 is the winning value from gate job 11708844")
+    p.add_argument("--phi_n_lfs", type=int, default=30,
+                   help="HMC trajectory length, or MCLMC n_steps when "
+                        "--phi_sampler=mclmc; 30 is the winning value from "
+                        "gate job 11708844 (was 80/240 for the retired HMC path)")
+    p.add_argument("--phi_sampler", type=str, default="mclmc", choices=("hmc", "mclmc"),
+                   help="Block 3 integrator. 'mclmc' promoted to default "
+                        "2026-08-08: gate job 11708844 showed MCLMC beating "
+                        "HMC ESS/wall-clock-second on all 6 probed l-bins at "
+                        "lmax=128 (achievements.md)")
+    p.add_argument("--phi_mclmc_L", type=float, default=200.0,
+                   help="MCLMC momentum decoherence length; 200 is the "
+                        "winning value from gate job 11708844 at lmax=128")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint_path", type=str,
                    default="results/analysis/pilot_coverage_lmax128_ckpt.npz")
@@ -364,6 +381,8 @@ def main():
         phi_initial=phi_start_packed,
         phi_hmc_step_size=args.phi_hmc_step_size,
         phi_n_lfs=args.phi_n_lfs,
+        phi_sampler=args.phi_sampler,
+        phi_mclmc_L=args.phi_mclmc_L,
         phi_mass_matrix='prior',
         sample_cl_phiphi=True,
         seed=args.seed,
