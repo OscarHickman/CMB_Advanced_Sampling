@@ -103,7 +103,7 @@ The shortened window does not change the critical path — it **hardens** it. Pr
 
 ## Currently doing
 
-**RESOLVED 2026-08-08: MCLMC spike GO, promoted to production Block 3 default. Job 11710475 in flight re-running the lmax=128 equilibration gate under MCLMC — check this first (see item 0's MCLMC entry below for full detail and the next-agent decision procedure).**
+**RESOLVED 2026-08-09: job 11710475 finished (COMPLETED, 16h58m, 3700 sweeps) — NO-GO.** MCLMC (n_steps=30, step_size=0.1, L=200) still does not clear the lag-1<0.2-by-lag-200 equilibration gate at lmax=128: worst-offending bins are [60,100) (r_200=0.160, never drops under 0.2 in the printed lags) and [100,128) (drift_sigma=1.10, and r_200=0.366 — got worse at long lag, not just slow). [2,10) also fails to settle (r_75=0.165 then back up to r_200=0.403). Only [10,30) and [30,60) look like they're heading toward the gate (first |r_k|<0.2 at lag 150 and lag 100 respectively). Full table and verdict: `logs/pilot_coverage_lmax128_mclmc_11710475.out`; chain+traces saved to `results/analysis/pilot_coverage_lmax128_mclmc_n3300.npz`. Per this doc's own decision procedure (below): **MCLMC won the ESS/s side-by-side (job 11708844) but not the equilibration gate** — this is a new, narrower finding, reported to the user rather than acted on. Do not revert to HMC (it didn't clear this gate at phi_n_lfs=240 either, job 11694912) and do not launch further tuning runs without user sign-off.
 
 **RESOLVED 2026-08-07: job 11694912 (`pilot_coverage_lmax128_phi240`) finished and was re-analyzed. Verdict: NO-GO, and the MCLMC spike is now triggered (user decision, 2026-08-07).**
 
