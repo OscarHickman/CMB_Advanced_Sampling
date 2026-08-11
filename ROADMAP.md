@@ -103,6 +103,36 @@ The shortened window does not change the critical path — it **hardens** it. Pr
 
 ## Currently doing
 
+### ⟹ NEXT SESSION — read this first
+
+**2026-08-11 harvest: both jobs from the prior session finished, one had a bug. Two new jobs are now in flight.**
+
+- **Job 11717685 (`tune_mclmc_nside128`) — DONE, no oscillation past step_size=0.05/L=100; recommended config step_size=0.005/L=100.** But even the non-oscillating configs show lag-1 ACF ~0.975-0.99 in the short tuning window — not a clear win yet, just Hypothesis A (oscillation) ruled out. Full detail: `achievements.md`.
+- **Job 11717687 (`lensing_blind_baseline`) — crashed after a full 3000-sweep chain** with `ValueError: not enough values to unpack (expected 5, got 4)` in `scripts/run_lensing_blind_baseline.py` (SLURM still reported `COMPLETED, exit 0:0` — the crash was in Python after the compute finished). Root cause: the script assumed `run_gibbs_chain` always returns a 5-tuple; with no φ block it returns 4. **Fixed** (`scripts/run_lensing_blind_baseline.py`). Resubmitted as **job 11731057**, resuming from the existing checkpoint (~2900+/3000 samples already there) rather than restarting.
+- **New v2 equilibration pilot launched: job 11731059** (`scripts/submit_pilot_coverage_lmax128_mclmc_v2.slurm`), step_size=0.005/L=100 from the tuning grid, fresh checkpoint, 3300 sweeps, 48h budget. Check status:
+
+```bash
+squeue -u dc-hick2
+```
+
+- **If 11731059 is DONE**: run `scripts/reanalyze_pilot_checkpoint.py --checkpoint results/analysis/pilot_coverage_lmax128_mclmc_v2_ckpt.npz --lmax 128` (or read the full-chain output if it finished within walltime) and check the fixed lag-1<0.2-by-lag-200 gate on all 5 l-bins, same as every prior pilot. **If GO**: proceed to the coverage ensemble (Todo §1). **If NO-GO again**: per the decision rule (`Sampler-lever decision` above), do not launch another tuning grid unilaterally — this would be evidence for trigger 3(a)/(b) (geometry problem or schedule threshold exceeded), report to the user for a decision.
+- **If 11731057 is DONE**: result is at `results/analysis/lensing_blind_baseline_lmax128.npz`. No further action needed — this data waits until the joint chain is equilibrated, then the two C_ℓ^TT posteriors are compared. **Check the `.err` file for a traceback even though SLURM says COMPLETED** — that's exactly how the first run's bug hid.
+
+---
+
+**2026-08-10: Two jobs queued following the diagnostic below (now resolved, see above).**
+- **Job 11717685** (dine2, 24h): `scripts/submit_tune_mclmc_nside128.slurm` — MCLMC step_size/L tuning grid at the *production* nside=128 (step_sizes={0.005,0.01,0.02,0.05} × L={100,200}, n_steps=30, 8 configs × 150+200 sweeps). Finds the non-oscillating step_size before relaunching the full equilibration pilot.
+- **Job 11717687** (dine2, 12h): `scripts/submit_lensing_blind_baseline.slurm` — Commander-style lensing-blind C_ℓ^TT baseline on the pilot simulation (seed=0, lmax=128, nside=128; Phase 0 Gibbs, no phi block, 500 burnin + 3000 samples). Generates the reference posterior for the §2.3 bias-reduction figure, independent of the phi-block equilibration.
+
+**RESOLVED 2026-08-10: job 11717684 (diagnose_equilibration_pathology, cosma5, 21s) — DONE.** Analysed the 3700-sweep MCLMC npz. Verdict:
+- **[2,10) bin: OSCILLATION (Hypothesis A confirmed).** Fine-lag ACF goes negative at lag 50, bounces back to +0.499 at lag 100 — textbook overshoot. step_size=0.1 was tuned at nside=64 (job 11708844); the whitened-space curvature at nside=128 is different. Fix: reduce step_size.
+- **[10,30), [30,60), [60,100), [100,128): SLOW DECAY (Hypothesis B, no oscillation, no drift).** Monotone ACF. The [60,100) bin has 27% of truth power at end-of-chain — large absolute bias from the same long mixing time.
+- **No burn-in pathology (Hypothesis C ruled out):** drift_sigma < 2.0 for all bins. MAP start is working.
+- **Action taken:** tuning grid job 11717685 queued immediately (Hypothesis A → find correct step_size); lensing-blind baseline job 11717687 queued in parallel (independent of equilibration).
+- **Full output:** `logs/diagnose_equilibration_pathology_11717684.out`; figure `results/analysis/diagnose_equilibration_pathology.png`.
+
+**RESOLVED 2026-08-10: literature/arXiv scan — clean.** Systematic scan of 2026 preprints from Millea (8), Seljak (14+), Bayer (1), Loureiro (5), Bonici (3), Crespi (0). **No competing preprints found.** None of the criteria triggered: no phi extension to Flinch, no Almanac lensing extension, no curved-sky joint (alm,Cl,phi,Clpp) sampler, no curved-sky MUSE. All Millea 2026 papers are SPT-3G observational (maps, clusters, SZ); Seljak 2026 papers are BAO field-level inference, MCMC algorithms, SPHEREx; Bayer 2026 is galaxy-field-level BAO. **Scoop risk: still low. Window: open.** Repeat scan before submission.
+
 **RESOLVED 2026-08-09: job 11710475 finished (COMPLETED, 16h58m, 3700 sweeps) — NO-GO.** MCLMC (n_steps=30, step_size=0.1, L=200) still does not clear the lag-1<0.2-by-lag-200 equilibration gate at lmax=128: worst-offending bins are [60,100) (r_200=0.160, never drops under 0.2 in the printed lags) and [100,128) (drift_sigma=1.10, and r_200=0.366 — got worse at long lag, not just slow). [2,10) also fails to settle (r_75=0.165 then back up to r_200=0.403). Only [10,30) and [30,60) look like they're heading toward the gate (first |r_k|<0.2 at lag 150 and lag 100 respectively). Full table and verdict: `logs/pilot_coverage_lmax128_mclmc_11710475.out`; chain+traces saved to `results/analysis/pilot_coverage_lmax128_mclmc_n3300.npz`. Per this doc's own decision procedure (below): **MCLMC won the ESS/s side-by-side (job 11708844) but not the equilibration gate** — this is a new, narrower finding, reported to the user rather than acted on. Do not revert to HMC (it didn't clear this gate at phi_n_lfs=240 either, job 11694912) and do not launch further tuning runs without user sign-off.
 
 **RESOLVED 2026-08-07: job 11694912 (`pilot_coverage_lmax128_phi240`) finished and was re-analyzed. Verdict: NO-GO, and the MCLMC spike is now triggered (user decision, 2026-08-07).**
@@ -121,8 +151,8 @@ The shortened window does not change the critical path — it **hardens** it. Pr
 
 ### 0. Added 2026-08-06 — do these first (cheap, unblocking, or window-driven)
 - [x] **Per-ℓ-bin φ-deficit-vs-S/N plot** from the existing lmax=300 outputs — done, see "Currently doing" above. Verdict: under-mixing/Wiener-suppressed-start, not sampler geometry (ρ=-0.78). MCLMC not triggered by this evidence.
-- [ ] **Start the manuscript file.** No manuscript exists for this paper. With the window shortening, the draft should be growing alongside the chains, not after them. Create it with the sections whose content is already fixed and does not depend on pending results: intro/positioning (the re-pitch above), related work (Flinch, Almanac, MUSE, Commander line, diffusion answers), methods (blocks, differentiable operator — framed as enabling machinery, *not* as the novelty), and the "what the deficit is not" paragraph. Leave results/figures as placeholders.
-- [ ] **Cite Flinch (arXiv:2510.26691) and Almanac (arXiv:2305.16134)** in related work with the distinction stated explicitly: both are curved-sky (map, C_ℓ) samplers; neither has a φ or C_L^φφ block. Highest-priority citation item in `literature.md`.
+- [x] **Start the manuscript file.** Created 2026-08-10: `docs/paper/main.tex` — RevTeX4-2, twocolumn. Contains all fixed sections: abstract (exact re-pitch language, joint posterior as the lead), intro/positioning vs Flinch/Almanac/MUSE/Commander/diffusion, all four method blocks, the differentiable-lensing-as-enabling-machinery framing, the "what the deficit is not" paragraph (rules out N0/N1, non-Gaussian phi, foregrounds, operator accuracy). Results/figures left as explicit placeholders with `\todo` and `\placeholder` macros.
+- [x] **Cite Flinch (arXiv:2510.26691) and Almanac (arXiv:2305.16134)** in related work — done in `docs/paper/main.tex` (2026-08-10). Both are cited in the intro and in §Discussion with the explicit distinction: both are curved-sky (map, C_ℓ) samplers; neither has a φ or C_L^φφ block. Flinch also cited in §Block 3 (MCLMC motivation) and §Lensing operator (enabling-machinery framing).
 - [x] **Citation-hygiene audit across this repo** for the two IDs corrected on 2026-08-05 — done 2026-08-06:
   - `arXiv:1701.01712` → `arXiv:1704.08230` fixed at `diffcmb/lensing.py:24`. No other occurrences outside `literature.md`.
   - `arXiv:2209.10512` — no occurrences outside `literature.md`; already correctly described there.
@@ -138,8 +168,7 @@ The shortened window does not change the critical path — it **hardens** it. Pr
     - n_steps grid at the winning step/L (n_steps∈{20,30,40}): **n_steps=30 beat HMC on 4/6 probed bins** (l=5,9,12,19; lost at l=2,16), bias check clean (all rel_diff<0.52 between HMC/MCLMC posterior means). Confirms the over-provisioned-trajectory-length hypothesis — cutting n_steps from 80→30 more than doubled ESS/s.
   - **RESOLVED 2026-08-08: job 11708844 (`gate_phi_mclmc_vs_hmc_L128`) finished — clear GO.** MCLMC (n_steps=30, step_size=0.1, L=200) beat the recorded HMC baseline (phi_n_lfs=240) on ESS/wall-clock-second at every probed l-bin, including a 4x win at the problem bin l=77 (HMC ESS/s=0.0010 vs MCLMC ESS/s=0.0040), and ran faster in absolute wall-clock too. Full numbers in `achievements.md`.
   - **Actioned 2026-08-08:** `phi_sampler='mclmc'` (n_steps=30, step_size=0.1, L=200) is now the default Block 3 path in `scripts/pilot_coverage_equilibration.py` (the HMC path remains available via `--phi_sampler hmc --phi_hmc_step_size 0.05 --phi_n_lfs 240`). New submission script `scripts/submit_pilot_coverage_lmax128_mclmc.slurm` launched as **job 11710475** (dine2, 48h walltime, checkpointing every 50 sweeps) to re-run the lmax=128/nside=128 equilibration gate under MCLMC and confirm the ESS/s win transfers to the lag-1/drift diagnostic the coverage-ensemble launch decision actually gates on.
-  - **Next AI agent: check `squeue -u dc-hick2` for job 11710475** — if finished, read `logs/pilot_coverage_lmax128_mclmc_<jobid>.out` for the GO/NO-GO verdict (same lag-1<0.2-by-lag-200 / drift gate as every prior pilot job). If GO: launch the coverage ensemble (item 1 below, harness already built) using `--thin` from this run's measured autocorrelation. If NO-GO: MCLMC won the ESS/s side-by-side but not the equilibration gate — treat as a new, narrower finding (report to user before further tuning), not a reason to revert to HMC (HMC didn't clear this gate either at phi_n_lfs=240).
-  - Do not spend further tuning cycles beyond this pilot-scale run without checking with the user first — see [[feedback_no_login_node_jobs]] and the session's repeated cost warnings.
+  - **RESOLVED 2026-08-10: job 11710475 returned NO-GO. Root cause diagnosed (job 11717684, 21s diagnostic). See ROADMAP.md "Currently doing" and achievements.md for full details. The next step is the step_size tuning grid (job 11717685) — see NEXT SESSION block above.**
 - [x] **Scope decision on the minimum publishable unit — decided 2026-08-06: broader scope, accepting scoop risk.** Real-data run and Phase 2b are back in scope for this paper (see the "Decision made" note under Time pressure and scope discipline above), not deferred.
 
 ### 1. Exactness evidence (highest value)
@@ -148,7 +177,7 @@ The shortened window does not change the critical path — it **hardens** it. Pr
 ### 2. Differentiator figures (what the paper is *for*)
 - [ ] Joint (C_ℓ^TT, C_L^φφ) posterior correlation figure — falls out of the coverage chains for free (`sample_cl_phiphi=True`). A single-chain test so far is underpowered, not negative; needs a longer/pooled trace.
 - [ ] Per-mode uncertainty-propagation figure: what joint sampling buys over marginal methods.
-- [ ] C_ℓ^TT bias reduction vs a lensing-blind (Commander-style) analysis of the same sims.
+- [~] C_ℓ^TT bias reduction vs a lensing-blind (Commander-style) analysis of the same sims. **Lensing-blind reference chain IN PROGRESS (job 11717687, dine2).** Output will be `results/analysis/lensing_blind_baseline_lmax128.npz` once done. The lensing-aware side needs the equilibrated joint chain; this item is half-done.
 - [ ] Write the position vs learned/amortised inference into the paper explicitly (intro + subsection) — the most likely referee question.
 - [ ] *(2026-08-06)* Write the position vs **Flinch and Almanac** explicitly too — curved-sky differentiable/HMC (map, C_ℓ) inference now exists and is lensing-blind. This is a *second*, separate referee question from the learned-inference one, and the answer is the φ / C_L^φφ block. Draft language is in the 2026-08-06 re-pitch.
 - [ ] *(2026-08-06 scope note, superseded)* The original MPU recommendation made items 2.2/2.3 conditional on falling out of the coverage chains cheaply. Superseded by the broader-scope decision above — 2.2 and 2.3 are full scope items now, not conditional. Item 2.1 (the joint correlation figure) remains the paper's headline object regardless.

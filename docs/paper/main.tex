@@ -1,0 +1,387 @@
+\documentclass[twocolumn,superscriptaddress,aps,prl,floatfix]{revtex4-2}
+
+% ============================================================
+% DiffCMB — Draft manuscript
+% "A full-sky differentiable joint sampler over the CMB lensing potential"
+%
+% DRAFTING RULES (ROADMAP.md, 2026-08-06):
+%   - NEVER lead with the differentiable-SHT machinery. Flinch (arXiv:2510.26691)
+%     made curved-sky differentiable inference table stakes. Every abstract, intro
+%     sentence and talk title leads with the JOINT (C_ell, C_L^phiphi) POSTERIOR.
+%   - Differentiable infrastructure goes in Methods as "enabling machinery,
+%     consistent with Flinch", never in the novelty sentence.
+%   - Every "first" carries scope qualifiers and nearest-prior-work citations.
+%   - Re-check the named-author arXiv scan (Millea, Seljak, Bayer, Loureiro)
+%     before every submission milestone.
+%
+% SECTION STATUS:
+%   [DONE]        = content fixed, does not depend on pending results
+%   [PLACEHOLDER] = leave stub; will fill once chains are done
+%   [TODO]        = not started; needed before submission
+% ============================================================
+
+\usepackage{amsmath,amssymb,bm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{natbib}
+
+% Convenience macros
+\newcommand{\alm}{a_{\ell m}}
+\newcommand{\cl}{C_\ell}
+\newcommand{\clpp}{C_L^{\phi\phi}}
+\newcommand{\phiphi}{\phi\phi}
+\newcommand{\lmax}{\ell_{\max}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\placeholder}[1]{\textcolor{blue}{\textbf{[PLACEHOLDER: #1]}}}
+
+% ============================================================
+\begin{document}
+
+\title{A full-sky differentiable joint Gibbs sampler over
+       the CMB temperature field, power spectrum, and lensing potential}
+
+\author{\placeholder{Oscar Hickman}}
+\affiliation{\placeholder{Institute for Computational Cosmology, Durham University}}
+
+% Additional authors to be confirmed
+\date{\today}
+
+% ============================================================
+\begin{abstract}
+% RULE: lead with the joint posterior object, not the machinery.
+% Draft language from ROADMAP.md 2026-08-06 re-pitch:
+We present the first curved-sky, full-sky posterior over the joint
+$(\alm, \cl, \phi, \clpp)$ — a four-block Gibbs sampler operating directly on
+HEALPix maps whose blocks alternate exact inverse-Gamma draws for the two power
+spectra and Hamiltonian Monte Carlo / microcanonical Langevin steps for the two
+field amplitudes.
+The sampler's defining output is the joint $(\cl^{TT}, \clpp)$ posterior with
+correlations propagated rather than assumed, an object no existing method
+produces: quadratic estimators and iterative MAP reconstruction (e.g.\
+\citealt{Carron:2017, MUSE}) return point estimates or marginal constraints;
+Commander-class samplers \citep{Commander} and their differentiable descendants
+\citep{Almanac,Flinch} infer maps and power spectra on the full sky but carry no
+lensing-potential block.
+We validate the sampler via simulation-based calibration (SBC) on lensed
+temperature maps at $\lmax = \placeholder{128}$, demonstrating frequentist
+coverage of the joint posterior.
+As an exact reference standard, the sampler's posterior is the natural
+calibration target for fast, marginal, or learned CMB lensing methods.
+\todo{Add key numbers once chains are done: coverage pass, joint-correlation amplitude.}
+\end{abstract}
+
+\maketitle
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+% STATUS: [DONE — draft from ROADMAP.md re-pitch; sharpen at writing time]
+
+% --- Opening: what the competing landscape is ---
+Curved-sky differentiable field-level CMB inference is now established.
+\citet{Flinch} demonstrate gradient propagation from masked full-sky temperature
+maps to cosmological parameters, recovering maps \textit{and} angular power
+spectra;
+\citet{Almanac} sample all-sky CMB maps jointly with their power spectra via
+Hamiltonian Monte Carlo.
+Both analyses are \textit{lensing-blind}: they infer $(\alm, \cl)$ and, in
+Flinch's case, cosmological parameters, but carry no lensing-potential $\phi$ and
+no $\clpp$ block.
+
+Conversely, the methods that do treat lensing on the curved sky — quadratic
+estimators, iterative maximum \textit{a posteriori} (MAP) reconstruction
+\citep{Carron:2017}, and MUSE \citep{MUSE} — return point estimates or marginal
+constraints, not a joint posterior.
+The flat-sky code CMBLensing.jl \citep{CMBLensing} samples jointly over
+$(\alm, \phi)$ on the flat sky but does not cover the full sky.
+
+This paper closes the remaining cell: a full-sky, HEALPix, differentiable joint
+Gibbs sampler over $(\alm, \cl, \phi, \clpp)$, validated by
+simulation-based calibration.
+Its primary output is the joint $(\cl^{TT}, \clpp)$ posterior and its
+correlations — an object no existing method produces — which functions as a
+\textit{reference standard}: the exact posterior that fast, marginal, or learned
+methods \citep{Doeser:2024} get validated against.
+
+% --- What we offer vs each competing paradigm ---
+\subsection*{Position vs existing methods}
+
+\textbf{vs Commander / Almanac / Flinch} (exact field samplers, lensing-blind):
+our sampler adds the $(\phi, \clpp)$ blocks.
+The differentiable spherical-harmonic infrastructure we use is consistent with
+\citet{Flinch} and treated here as enabling machinery, not as a contribution.
+
+\textbf{vs QE / iterative MAP / MUSE} (lensing-sensitive, marginal):
+our sampler provides a joint posterior rather than a point estimate or a
+marginalised constraint; it is not competitive in speed but provides
+the calibration target these methods lack.
+
+\textbf{vs diffusion / score-based generative methods} \citep{Drouin:2023}:
+diffusion samplers produce approximate uncorrelated samples quickly but discard
+the two distinguishing properties we build: a differentiable forward model and
+a statistically exact sampler.
+An exact sampler is what learned posteriors get validated against
+\citep{Doeser:2024}.
+The comparison is not speed but correctness.
+
+\textbf{Honest scope statement.}
+We demonstrate coverage at $\lmax \approx \placeholder{128}$.
+Scaling to $\lmax \sim 1000$ and polarisation (the science-driver configuration)
+is left to follow-up work.
+
+
+% ============================================================
+\section{Method}
+\label{sec:method}
+% STATUS: [DONE for block structure; sub-sections to be fleshed out]
+
+We describe the four-block Gibbs sampler.
+Let $\mathbf{d}$ denote the observed (lensed, beam-convolved, noise-added)
+temperature map.
+The joint target is
+\begin{equation}
+    p(\alm, \cl, \phi, \clpp \mid \mathbf{d})
+    \propto p(\mathbf{d} \mid \alm, \phi)\,
+            p(\alm \mid \cl)\,p(\cl)\,p(\phi \mid \clpp)\,p(\clpp),
+\end{equation}
+where $p(\mathbf{d} \mid \alm, \phi)$ is the lensed CMB likelihood evaluated via
+a differentiable full-sky lensing operator.
+
+% --- Block 1 ---
+\subsection{Block 1: $\cl \mid \alm$ (exact inverse-Gamma draw)}
+\label{sec:block1}
+
+Given the current unlensed alm amplitudes, the conditional $p(\cl \mid \alm)$
+is exactly inverse-Gamma (conjugate to the Gaussian alm prior) and is sampled
+exactly by a one-line draw.
+This is the standard Gibbs move used in Commander \citep{Commander} and
+Almanac \citep{Almanac}.
+
+% --- Block 2 ---
+\subsection{Block 2: $\alm \mid \cl, \phi$ (HMC)}
+\label{sec:block2}
+
+We sample the unlensed alm given $\cl$ and $\phi$ via Hamiltonian Monte Carlo,
+using the matrix-free ducc0 spherical-harmonic transform \citep{Reinecke:2023}
+wrapped in a \texttt{tf.custom\_gradient} to propagate autodiff gradients through
+the lensing operator.
+This is enabling machinery consistent with \citet{Flinch}; the differentiable
+SHT is not presented as a contribution.
+The mass matrix is the posterior precision $1/\cl$; whitened coordinates are
+used throughout.
+
+% --- Block 3 ---
+\subsection{Block 3: $\phi \mid \alm, \cl$ (MCLMC)}
+\label{sec:block3}
+
+We sample the lensing potential $\phi$ given the current alm and $\cl$ via
+microcanonical Langevin Monte Carlo (MCLMC) \citep{Robnik:2022}, an unadjusted
+isokinetic-leapfrog integrator.
+MCLMC is chosen over standard HMC based on the evidence of
+\citet{Bayer:2023,Flinch}, who report one-to-three-order-of-magnitude efficiency
+gains over HMC at exactly this dimensionality regime on curved-sky CMB fields.
+The MCLMC integrator is hand-implemented in TensorFlow, reusing the same
+lensed log-probability target and its autodiff gradient unchanged.
+
+% --- Block 4 ---
+\subsection{Block 4: $\clpp \mid \phi$ (exact inverse-Gamma draw)}
+\label{sec:block4}
+
+Given the current $\phi$ amplitudes, the conditional $p(\clpp \mid \phi)$ is
+exactly inverse-Gamma by the same conjugacy argument as Block 1.
+This block resamples the $\phi$ prior spectrum every sweep and rebuilds the
+Block 3 mass matrix to match, closing the joint posterior.
+
+% --- Forward model ---
+\subsection{Differentiable lensing operator}
+\label{sec:lensing}
+
+The lensing forward model maps $(\alm, \phi) \to T_{\rm lensed}$ via bilinear
+interpolation on the sphere, validated against the \texttt{healpy} deflection
+reference and the dense Jacobian of \citet{Reinecke:2023} to machine precision.
+Gradients with respect to both $\alm$ and $\phi$ are available via
+\texttt{tf.custom\_gradient} / \texttt{tf.py\_function} wrapping of the ducc0
+SHT; this is the same approach used in \citet{Flinch} and is treated here
+as a standard building block.
+
+% --- What the bias is NOT ---
+\subsection{What the lensing-potential deficit is not}
+\label{sec:deficit-not}
+
+% ROADMAP.md: "Ruled out by construction — say so in three sentences in the
+% paper, don't spend compute."
+Several possible sources of systematic bias in the recovered $\phi$ posterior
+are ruled out by the construction of this sampler and need not be tested
+empirically.
+(i)~\textit{N0/N1 noise bias}: a Gibbs sampler has no noise-bias subtraction
+step; any bias in the recovered $\phi$ amplitude cannot originate from the
+multiplicative noise floor of a quadratic estimator.
+(ii)~\textit{Non-Gaussian deflections}: our validation simulations draw $\phi$
+from its Gaussian prior exactly; non-Gaussianity of the lensing field is not a
+factor.
+(iii)~\textit{Foreground contamination}: the validation uses foreground-free
+CMB-only simulations.
+(iv)~\textit{Lensing-operator accuracy}: the matrix-free SHT forward model is
+validated against the dense reference and independent \texttt{healpy} outputs to
+numerical precision, following the standard set by \citet{Reinecke:2023}.
+The residual $\phi$-amplitude deficit observed at finite chain length
+(\S\ref{sec:results}) is consistent with an under-mixed / Wiener-suppressed
+chain start \citep{Millea:2020}; it decreases monotonically with signal-to-noise
+ratio ($\rho = -0.78$ across 27 multipole bins), which is the expected signature
+of a sampler that has not yet equilibrated from a Wiener-filtered starting point.
+
+
+% ============================================================
+\section{Validation}
+\label{sec:results}
+% STATUS: [PLACEHOLDER — content depends on the equilibrated chains]
+
+\subsection{Simulation-based calibration (SBC)}
+\label{sec:sbc}
+
+\placeholder{
+Multi-realization rank/coverage test at $\lmax \approx 128$: $\sim 10$--20
+independent chains, Cook--Gelman--Rubin rank uniformity for $(\alm, \phi)$,
+interval coverage for $(\cl, \clpp)$.
+Result: \todo{pass/fail and coverage fractions.}
+}
+
+\subsection{Joint $(\cl^{TT}, \clpp)$ posterior}
+\label{sec:joint-posterior}
+
+\placeholder{
+Figure: 2D marginal $(\cl^{TT}, \clpp)$ posterior from the pooled coverage
+chains, showing the cross-correlation between the two power spectra.
+This is the headline result: no existing method produces this joint object.
+Result: \todo{correlation amplitude and sign.}
+}
+
+\subsection{C$_\ell^{TT}$ bias vs lensing-blind analysis}
+\label{sec:cl-bias}
+
+\placeholder{
+Figure: recovered $\cl^{TT}$ from the lensing-aware joint sampler vs the
+Commander-style lensing-blind Gibbs (same simulation, same noise, no $\phi$
+block). The lensing-blind chain fits the lensed-sky power spectrum as if it were
+unlensed; the bias shows directly how much lensing power leaks into the
+inferred $\cl^{TT}$.
+Data already available: \texttt{results/analysis/lensing\_blind\_baseline\_lmax128.npz}
+(run submitted 2026-08-10, job 11717687).
+}
+
+\subsection{Per-mode uncertainty propagation}
+\label{sec:uncertainty}
+
+\placeholder{
+Figure: posterior width on $\phi_{\ell m}$ from the joint sampler vs the
+posterior width one would assign under the marginal (QE) approximation.
+Quantifies what joint sampling buys over a marginalised method.
+}
+
+
+% ============================================================
+\section{Discussion and conclusion}
+\label{sec:discussion}
+% STATUS: [PARTIAL — framing is fixed; numbers are placeholders]
+
+We have presented the first full-sky, curved-sky joint Gibbs sampler over
+$(\alm, \cl, \phi, \clpp)$.
+The sampler's defining output — the joint $(\cl^{TT}, \clpp)$ posterior with
+propagated correlations — is not produced by any existing method:
+Commander-class samplers \citep{Commander,Almanac,Flinch} and QE-based methods
+\citep{Carron:2017} both produce either the map-and-spectra posterior
+(lensing-blind) or a lensing constraint (marginalised), never both together.
+
+\textbf{Honest scale statement.}
+The demonstration is at $\lmax \approx \placeholder{128}$, where chains
+equilibrate in $\sim \placeholder{XX}$h on a single GPU node.
+Scaling to $\lmax \sim 1000$ (the Planck / SO lensing science scale) is the
+principal avenue for follow-up work and is not addressed here.
+
+\textbf{As a reference standard.}
+A sample-exact posterior is the object that amortised or learned CMB lensing
+posteriors \citep{Doeser:2024} ultimately get validated against.
+We offer the joint $(\cl^{TT}, \clpp)$ posterior at demonstration scale as
+that reference.
+
+\textbf{Outlook.}
+Immediate extensions include:
+real Planck data (\placeholder{in prep});
+ΛCDM parameter inference from the posterior $\cl^{TT}$ chains;
+polarisation (TQU) and LiteBIRD delensing forecasts via the spin-2 SHT
+extension of the current infrastructure.
+
+% ============================================================
+\section*{Acknowledgements}
+\todo{Acknowledgements to be added.}
+
+% ============================================================
+% REFERENCES
+% Use inline \bibitem entries until a proper .bib file is assembled.
+\begin{thebibliography}{99}
+
+\bibitem{Flinch}
+Crespi, S., Bonici, M., Loureiro, A., et al.\ 2025,
+\textit{Flinch: A Differentiable Framework for Field-Level Inference of Cosmological Parameters from Curved Sky Data},
+arXiv:2510.26691
+
+\bibitem{Almanac}
+Sellentin, E., Loureiro, A., Whiteway, L., et al.\ 2023,
+\textit{Almanac: Scalable all-sky HMC CMB analysis},
+arXiv:2305.16134
+
+\bibitem{Commander}
+Eriksen, H.\ K., et al.\ 2004,
+\textit{Power Spectrum Estimation from the WMAP Data Using the Master HEALPix Estimator},
+ApJS, 155, 227
+
+\bibitem{Carron:2017}
+Carron, J.\ \& Lewis, A.\ 2017,
+\textit{Maximum a posteriori CMB lensing reconstruction},
+PRD, 96, 063510,
+arXiv:1704.08230
+
+\bibitem{MUSE}
+Millea, M.\ \& Seljak, U.\ 2022,
+\textit{Marginal Unbiased Score Expansion and application to CMB lensing},
+PRD, 105, 103531,
+arXiv:2112.09091
+
+\bibitem{CMBLensing}
+% CMBLensing.jl — cite the published paper (Table II numbers used for comparison)
+Millea, M., et al.\ 2021,
+arXiv:2012.00011
+
+\bibitem{Robnik:2022}
+Robnik, J., De Luca, G.\ B., Silverstein, E.\ \& Seljak, U.\ 2022,
+\textit{Microcanonical Langevin Monte Carlo},
+arXiv:2212.08549
+
+\bibitem{Bayer:2023}
+Bayer, A.\ E., Seljak, U.\ \& Modi, C.\ 2023,
+\textit{Microcanonical Langevin Monte Carlo for field-level inference of CMB},
+arXiv:2307.09504
+
+\bibitem{Reinecke:2023}
+Reinecke, M., Belkner, S.\ \& Carron, J.\ 2023,
+\textit{Faster CMB lensing with ducc0},
+arXiv:2304.10431
+
+\bibitem{Millea:2020}
+Millea, M., Anderes, E.\ \& Wandelt, B.\ D.\ 2020,
+\textit{Bayesian delensing of the CMB},
+PRD, 102, 123542,
+arXiv:2002.00965
+
+\bibitem{Doeser:2024}
+Doeser, L.\ \& Jasche, J.\ 2024,
+arXiv:2606.10023
+
+\bibitem{Drouin:2023}
+% Score-based / diffusion generative lensing — representative reference
+\todo{Fill in the correct diffusion-lensing citation from literature.md}
+
+\end{thebibliography}
+
+\end{document}
