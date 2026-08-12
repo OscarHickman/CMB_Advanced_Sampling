@@ -153,4 +153,6 @@ logs/
 archive/
 *.png
 *.npz
+*.npy
+results/analysis/mclmc_tune_nside128/
 .antigravitycli/
