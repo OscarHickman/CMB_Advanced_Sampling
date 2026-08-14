@@ -830,9 +830,15 @@ def run_gibbs_chain(
     `phi_hmc_step_size` is used as a FIXED step size (no Robbins-Monro
     adaptation; this is a bounded spike, not a new adaptive scheme), and
     `phi_accepts_out`/checkpointing's accept-rate bookkeeping is repurposed to
-    track "trajectory did not diverge" instead of an M-H accept. Requires
-    `phi_mass_matrix='prior'` (the 'fisher' variant is untested with this
-    integrator and out of the spike's scope).
+    track "trajectory did not diverge" instead of an M-H accept.
+    `phi_mass_matrix='fisher'` is now also allowed with `phi_sampler='mclmc'`
+    (2026-08-14 geometry-fix spike, ROADMAP.md) as a diagnostic: the
+    fisher-warmup code path (see `estimate_phi_diag_fisher` below) is
+    generic across both integrators, keyed only on `sample_phi and not
+    phi_fisher_done`, and does not special-case which sampler consumes the
+    resulting `phi_mass_sqrt_np`/`phi_state_var`. Still requires
+    `sample_cl_phiphi=False` (Block 4 off), same reasoning as the
+    HMC+fisher+Block4 guard above.
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
@@ -856,11 +862,16 @@ def run_gibbs_chain(
         raise ValueError(f"phi_sampler must be 'hmc' or 'mclmc', got {phi_sampler!r}")
     if phi_sampler == 'mclmc' and not sample_phi:
         raise ValueError("phi_sampler='mclmc' requires cl_phiphi_full (Block 3) to be given")
-    if phi_sampler == 'mclmc' and phi_mass_matrix == 'fisher':
+    if phi_sampler == 'mclmc' and phi_mass_matrix == 'fisher' and sample_cl_phiphi:
         raise ValueError(
-            "phi_sampler='mclmc' is not validated together with "
-            "phi_mass_matrix='fisher' -- out of the bounded spike's scope "
-            "(ROADMAP.md, 2026-08-07); use phi_mass_matrix='prior'"
+            "phi_sampler='mclmc' + phi_mass_matrix='fisher' is only "
+            "validated with sample_cl_phiphi=False (Block 4 off) -- the "
+            "fisher mass matrix is a one-time burn-in estimate, frozen "
+            "thereafter, which is inconsistent with Block 4 resampling "
+            "cl_phiphi_full (and rebuilding the mass matrix from it) every "
+            "sweep. This is the same constraint as the HMC+fisher+Block4 "
+            "guard above, now also applied to MCLMC "
+            "(ROADMAP.md, 2026-08-14 geometry-fix spike)."
         )
     # alm_sampler='cg' + sample_phi is the Phase 2 gate-2 exactness experiment
     # (ROADMAP.md Section 1): Block 2 draws an exact Gaussian alm sample against
