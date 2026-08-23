@@ -19,7 +19,7 @@
 
 ### ⟹ NEXT SESSION — read this first
 
-**φ-block equilibration: lmax=128 scale-up is NO-GO, harvested 2026-08-22 (job 11830353). Awaiting user sign-off before trying anything further (standing rule below).**
+**φ-block equilibration: lmax=128 scale-up is NO-GO (harvested 2026-08-22, job 11830353). Block 4 + `phi_mass_matrix='block'` unblocked 2026-08-23; the production-configuration gate (job 11836793, lmax=64 with Block 4 ON) is in flight — check it first.**
 
 - Root cause + fix at lmax=64, both closed (`achievements.md`): the φ-block posterior has cross-L Hessian coupling no diagonal-in-L mass matrix can represent; `phi_mass_matrix='block'` (a per-m-block Nystrom correction) fixes it there. NUTS alone does not (job 11781382, NO-GO) — confirms it was never a trajectory-length problem.
 - **lmax=64 (job 11781626): GO, harvested 2026-08-18.** Worst lag-1 autocorrelation 0.557, worst drift 0.20σ.
@@ -33,7 +33,7 @@ Item 2's first bullet claims the joint (C_ℓ, C_L^φφ) figure "falls out of th
 
 - **The guard is conservative, not mathematically required.** Its stated reason is that a burn-in-frozen mass matrix "would be inconsistent with a spectrum that keeps changing every sweep" — an *efficiency* argument. HMC leaves its target invariant for **any** fixed SPD mass matrix; only a mass matrix adapted from the current state during sampling would break detailed balance. A frozen block mass matrix built at a fiducial C_L^φφ is exact, merely suboptimal. Relaxing the guard + a test asserting the invariant distribution is unchanged looks like the cheap unblock.
 - **Real risk to check, not assume away:** the lmax=64 GO was measured with **Block 4 off**. Turning Block 4 on couples low-L φ amplitudes to a C_L^φφ drawn from an inverse-Gamma with very few modes (L=2 has 5) — a centred-parameterisation funnel, exactly the geometry most likely to hurt *low L*, which is already the weak spot at lmax=128. So the production configuration has never been gated.
-- **Consequence:** the next gate run should be lmax=64 **with Block 4 on** (~11h, a proven scale), not another lmax=128 attempt.
+- **Consequence, actioned 2026-08-23:** the guard was relaxed (`run_gibbs_chain` now allows `sample_cl_phiphi=True` + `phi_mass_matrix='block'`; `'fisher'` stays excluded, out of scope) by freezing only the expensive likelihood-curvature estimate and cheaply rebuilding the diagonal prior-precision term from the resampled spectrum every sweep. Full suite green (102 passed/1 skipped), committed (`4f6eb74`). **Job 11836793 launched** (`submit_pilot_coverage_lmax64_block_cl4.slurm`, lmax=64, same config as the GO job 11781626 but with Block 4 now ON) — the actual production configuration, gated for the first time. ~11h expected; check `sacct -j 11836793` / `logs/pilot_coverage_lmax64_block_cl4_11836793.out` next session.
 
 **Also note:** job 11781626's own verdict line already recommended lmax=64 for the ensemble — "lmax=64 at ~12s/sweep is a defensible configuration for the O(10-20)-chain rank/coverage ensemble". That recommendation was not acted on; effort went to scaling to 128 instead. Per the standing "demonstrated beats asserted" rule, a fully-passing rank test at lmax=64 outranks a partially-passing one at lmax=128.
 
