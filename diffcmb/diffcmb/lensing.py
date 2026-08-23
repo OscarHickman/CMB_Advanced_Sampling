@@ -1046,3 +1046,128 @@ def estimate_phi_diag_fisher(
             h_ii[k] = (g1[i] - g0[i]) / eps
         diag_fisher_per_L[L] = np.mean(np.maximum(h_ii, 0.0))
     return diag_fisher_per_L
+
+
+def estimate_phi_block_hessian(
+    model,
+    params_tf: "tf.Tensor",
+    phi_packed_tf: "tf.Tensor",
+    lmax: int,
+    n_probes: int = 6,
+    rng=None,
+    eps: float = 1e-9,
+) -> dict:
+    """Nystrom low-rank approximation of psi_lensed's Hessian w.r.t. phi,
+    block-diagonal by m (real and imag channels separately) -- the
+    structurally motivated fix for the cross-L Hessian coupling
+    diagnose_phi_hessian_coupling.py found significant (achievements.md,
+    ROADMAP.md 2026-08-17: mean coupling ratios 0.263/0.621, up to 0.97 at
+    individual chain points, between L-bins as far apart as [10,30) and
+    [60,lmax)). estimate_phi_diag_fisher's per-L diagonal and
+    build_phi_prior_mass_sqrt's prior-only diagonal are both diagonal-in-L
+    and cannot represent this by construction, however they are tuned --
+    every diagonal-mass-matrix configuration tried failed the equilibration
+    gate (achievements.md's "Coverage-test prerequisite findings").
+
+    Grouping by m (not a nearest-neighbour band in L) follows this
+    codebase's existing precedent for the analogous problem in the alm
+    Block-2 messenger sampler (messenger.py::build_block_cholesky,
+    samplers.py::_calibrate_block_AtA): there, same-m coupling in the SHT
+    operator's A^T A was found to dominate (>99% of off-diagonal energy,
+    scripts/analyze_AtA_structure.py) over cross-m coupling, with magnitude
+    roughly flat across the whole L range rather than decaying -- i.e. a
+    long-range-in-L, same-m structure, not a local band. The cross-L
+    coupling diagnose_phi_hessian_coupling.py found (between bins spanning
+    m=0..L for both) is consistent with the same picture, but has not been
+    independently decomposed by m for the phi Hessian specifically -- this
+    is an assumption carried over from the messenger precedent, to be
+    checked against whether the resulting pilot (ROADMAP.md) actually
+    clears the equilibration gate.
+
+    Method (Nystrom): for each m-block (indices sharing the same m and
+    real/imag channel, size K = number of L's spanning that m), sample
+    up to n_probes source coordinates uniformly from the block and, for
+    each, perturb it by eps and take the finite difference of the
+    already-validated analytic gradient (same eps/single-coordinate-probe
+    method as estimate_phi_diag_fisher -- deliberately not a joint
+    multi-coordinate probe, for the same bilinear-interpolation-cell-
+    boundary-instability reason documented there). This gives n_probes
+    exact columns of the block's true (K, K) Hessian restricted to the
+    sampled source indices S. The Nystrom approximation
+        H_block ≈ H[:, S] @ pinv(H[S, S]) @ H[:, S]^T
+    (H[S, S] symmetrized and eigenvalue-clipped for numerical safety
+    before pseudo-inversion) reconstructs a rank-<=n_probes PSD estimate
+    of the full block from only n_probes gradient evaluations per block --
+    same asymptotic cost as estimate_phi_diag_fisher's per-L diagonal
+    (n_probes gradient evals per bin), now per m-block instead of per L.
+
+    Returns
+    -------
+    blocks : dict {(channel, m): (idx, H_nystrom)} -- channel in
+        ('real', 'imag'); idx a sorted int array of packed-phi positions
+        in the block (packed layout matching samplers.py::_alm_index_lm);
+        H_nystrom the (K, K) symmetric PSD Nystrom approximation.
+        Blocks with K < 2 (nothing to couple) are omitted.
+    """
+    if tf is None:
+        raise ImportError("tensorflow is required for estimate_phi_block_hessian")
+    if rng is None:
+        rng = np.random.default_rng()
+
+    phi_np = (
+        phi_packed_tf.numpy() if hasattr(phi_packed_tf, "numpy") else np.asarray(phi_packed_tf)
+    )
+
+    def grad_at(phi_val: np.ndarray) -> np.ndarray:
+        phi_var = tf.Variable(phi_val, dtype=tf.float64)
+        with tf.GradientTape() as tape:
+            val = psi_lensed(model, params_tf, phi_var)
+        return tape.gradient(val, phi_var).numpy()
+
+    g0 = grad_at(phi_np)
+
+    from .samplers import _alm_index_lm
+
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    channel_arr = np.array(["real"] * n_real + ["imag"] * n_imag)
+
+    blocks = {}
+    for channel in ("real", "imag"):
+        chan_mask = channel_arr == channel
+        for m in sorted(np.unique(m_arr[chan_mask])):
+            idx = np.where(chan_mask & (m_arr == m))[0]
+            K = len(idx)
+            if K < 2:
+                continue
+            n_s = min(n_probes, K)
+            s_local = rng.choice(K, size=n_s, replace=False)
+            s_global = idx[s_local]
+
+            cols = np.empty((K, n_s), dtype=np.float64)
+            for k, j in enumerate(s_global):
+                phi_p = phi_np.copy()
+                phi_p[j] += eps
+                g1 = grad_at(phi_p)
+                cols[:, k] = (g1[idx] - g0[idx]) / eps
+
+            H_SS = cols[s_local, :]
+            H_SS = 0.5 * (H_SS + H_SS.T)
+            eigval, eigvec = np.linalg.eigh(H_SS)
+            # Regularisation floor relative to this block's own eigenvalue
+            # scale, not an absolute constant: psi_lensed's curvature scale
+            # varies by many orders of magnitude across L (cl_phiphi spans
+            # ~1e-16 to ~1e-8 in typical use), so a fixed absolute floor like
+            # 1e-12 is either far too small (letting FD-noise eigenvalues
+            # near zero through, then dividing by them -- the bug an earlier
+            # version of this hit: reconstructed blocks off by ~1e15x) or far
+            # too large (discarding real curvature) depending on scale.
+            eig_floor = max(float(np.max(np.abs(eigval))), 1e-300) * 1e-6
+            eigval_clipped = np.clip(eigval, eig_floor, None)
+            H_SS_pinv = (eigvec * (1.0 / eigval_clipped)) @ eigvec.T
+            H_nystrom = cols @ H_SS_pinv @ cols.T
+            H_nystrom = 0.5 * (H_nystrom + H_nystrom.T)
+            blocks[(channel, int(m))] = (idx, H_nystrom)
+
+    return blocks

@@ -249,14 +249,56 @@ def main():
                    help="HMC trajectory length, or MCLMC n_steps when "
                         "--phi_sampler=mclmc; 30 is the winning value from "
                         "gate job 11708844 (was 80/240 for the retired HMC path)")
-    p.add_argument("--phi_sampler", type=str, default="mclmc", choices=("hmc", "mclmc"),
+    p.add_argument("--phi_sampler", type=str, default="mclmc",
+                   choices=("hmc", "mclmc", "nuts"),
                    help="Block 3 integrator. 'mclmc' promoted to default "
                         "2026-08-08: gate job 11708844 showed MCLMC beating "
                         "HMC ESS/wall-clock-second on all 6 probed l-bins at "
-                        "lmax=128 (achievements.md)")
+                        "lmax=128 (achievements.md). 'nuts' (2026-08-17 "
+                        "spike): dynamic trajectory length via the no-U-turn "
+                        "criterion, since every fixed-step-size lever (HMC "
+                        "and MCLMC alike) has failed the equilibration gate "
+                        "regardless of tuning -- ignores --phi_n_lfs.")
     p.add_argument("--phi_mclmc_L", type=float, default=200.0,
                    help="MCLMC momentum decoherence length; 200 is the "
                         "winning value from gate job 11708844 at lmax=128")
+    p.add_argument("--phi_nuts_max_tree_depth", type=int, default=10,
+                   help="only used when --phi_sampler=nuts")
+    p.add_argument("--phi_mass_matrix", type=str, default="prior",
+                   choices=("prior", "fisher", "block"),
+                   help="Block 3 HMC/NUTS/MCLMC preconditioner. 'prior' "
+                        "(default, unchanged) is diagonal-in-L, prior-curvature "
+                        "only -- what every gate run to date has used, together "
+                        "with Block 4 (C_L^phiphi|phi) forced on. 'block' "
+                        "(2026-08-18, ROADMAP.md/achievements.md) adds "
+                        "lensing.py::estimate_phi_block_hessian's cross-L "
+                        "Nystrom correction, the structurally motivated fix for "
+                        "the cross-L Hessian coupling "
+                        "diagnose_phi_hessian_coupling.py found significant -- "
+                        "no diagonal mass matrix ('prior' or 'fisher') can "
+                        "represent it. 'fisher' adds only the diagonal "
+                        "likelihood-curvature term (samplers.py::"
+                        "build_phi_posterior_mass_sqrt), kept for comparison. "
+                        "'fisher' is a one-time burn-in estimate, frozen "
+                        "thereafter, and (samplers.py) not supported together "
+                        "with Block 4 -- selecting it FORCES Block 4 off for "
+                        "this run (sample_cl_phiphi=False, cl_phiphi_true used "
+                        "as a fixed spectrum throughout). 'block' IS supported "
+                        "with Block 4 (2026-08-23, ROADMAP.md/samplers.py): its "
+                        "expensive likelihood-curvature estimate is frozen the "
+                        "same way, but the diagonal prior-precision term is "
+                        "cheaply rebuilt every sweep to track Block 4's "
+                        "resampled spectrum, so Block 4 stays ON by default "
+                        "for 'block' same as 'prior'.")
+    p.add_argument("--phi_fisher_warmup_iter", type=int, default=20,
+                   help="burn-in sweep at which the 'fisher'/'block' mass "
+                        "matrix is computed (once, then frozen)")
+    p.add_argument("--phi_fisher_n_probes", type=int, default=8,
+                   help="coordinate samples per L for the diagonal "
+                        "Fisher/prior-curvature term in 'fisher'/'block' mode")
+    p.add_argument("--phi_block_n_probes", type=int, default=6,
+                   help="coordinate samples per m-block for 'block' mode's "
+                        "cross-L Nystrom correction (ignored otherwise)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint_path", type=str,
                    default="results/analysis/pilot_coverage_lmax128_ckpt.npz")
@@ -267,10 +309,16 @@ def main():
 
     lmax, nside = args.lmax, args.nside
 
+    # 'fisher' is a one-time burn-in estimate, frozen thereafter (samplers.py),
+    # not supported together with Block 4's every-sweep spectrum resampling.
+    # 'block' IS supported (2026-08-23) -- see --phi_mass_matrix's help text.
+    use_block4 = args.phi_mass_matrix in ('prior', 'block')
+
     print(f"=== Coverage-test prerequisite gate: phi equilibration pilot at "
           f"lmax={lmax} (nside={nside}) ===")
-    print("Warm-started AWAY from truth; Block 4 (C_L^phiphi|phi) ON; "
-          "phi_mass_matrix='prior' (forced).\n")
+    print(f"Warm-started AWAY from truth; Block 4 (C_L^phiphi|phi) "
+          f"{'ON' if use_block4 else 'OFF (forced by phi_mass_matrix)'}; "
+          f"phi_mass_matrix={args.phi_mass_matrix!r}.\n")
 
     print("Building matrix-free-SHT model (synthetic, full-sky)...")
     model = CosmologyAdvancedSampling(
@@ -370,25 +418,45 @@ def main():
           f"phi_n_lfs={args.phi_n_lfs} "
           f"(checkpoint={args.checkpoint_path})...")
     t0 = time.time()
-    samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = run_gibbs_chain(
-        model,
-        n_samples=args.n_samples,
-        n_burnin=args.n_burnin,
-        hmc_step_size=args.hmc_step_size,
-        n_lfs=args.n_lfs,
-        initial_params=x0,
-        cl_phiphi_full=cl_phiphi_true,
-        phi_initial=phi_start_packed,
-        phi_hmc_step_size=args.phi_hmc_step_size,
-        phi_n_lfs=args.phi_n_lfs,
-        phi_sampler=args.phi_sampler,
-        phi_mclmc_L=args.phi_mclmc_L,
-        phi_mass_matrix='prior',
-        sample_cl_phiphi=True,
-        seed=args.seed,
-        checkpoint_path=args.checkpoint_path,
-        checkpoint_every=args.checkpoint_every,
-    )
+    gibbs_kwargs = {
+        "n_samples": args.n_samples,
+        "n_burnin": args.n_burnin,
+        "hmc_step_size": args.hmc_step_size,
+        "n_lfs": args.n_lfs,
+        "initial_params": x0,
+        "cl_phiphi_full": cl_phiphi_true,
+        "phi_initial": phi_start_packed,
+        "phi_hmc_step_size": args.phi_hmc_step_size,
+        "phi_n_lfs": args.phi_n_lfs,
+        "phi_sampler": args.phi_sampler,
+        "phi_mclmc_L": args.phi_mclmc_L,
+        "phi_nuts_max_tree_depth": args.phi_nuts_max_tree_depth,
+        "phi_mass_matrix": args.phi_mass_matrix,
+        "seed": args.seed,
+        "checkpoint_path": args.checkpoint_path,
+        "checkpoint_every": args.checkpoint_every,
+    }
+    if args.phi_mass_matrix in ('fisher', 'block'):
+        gibbs_kwargs.update(
+            phi_fisher_warmup_iter=args.phi_fisher_warmup_iter,
+            phi_fisher_n_probes=args.phi_fisher_n_probes,
+        )
+    if args.phi_mass_matrix == 'block':
+        gibbs_kwargs.update(phi_block_n_probes=args.phi_block_n_probes)
+    if use_block4:
+        gibbs_kwargs.update(sample_cl_phiphi=True)
+        samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = run_gibbs_chain(
+            model, **gibbs_kwargs
+        )
+    else:
+        samples, phi_samples, logp, accepts, final_step = run_gibbs_chain(
+            model, **gibbs_kwargs
+        )
+        # No Block 4: cl_phiphi_full stays fixed at the truth spectrum
+        # throughout, so there is no per-sweep sample trace to report --
+        # save/report cl_true's own value at every collected sample for a
+        # shape-compatible artifact (see np.savez below).
+        cl_phiphi_samples = np.tile(np.log(cl_phiphi_true[2:lmax]), (len(samples), 1))
     elapsed = time.time() - t0
     n_collected = max(1, len(samples))
     sweeps = args.n_burnin + n_collected

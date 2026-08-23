@@ -298,6 +298,42 @@ def test_gibbs_chain_with_phi_block_mclmc_moves(small_model):
 
 
 @skip_no_tfp
+def test_gibbs_chain_with_phi_block_nuts_moves(small_model):
+    """NUTS spike (ROADMAP.md, 2026-08-17): phi_sampler='nuts' drop-in for
+    Block 3 -- dynamic trajectory length via the no-U-turn criterion instead
+    of a fixed phi_n_lfs, same smoke-test shape as the HMC/MCLMC phi-block
+    tests above. No phi_n_lfs needed (NUTS ignores it and picks its own
+    trajectory length per step)."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+
+    samples, phi_samples, logp, accepts, final_step = run_gibbs_chain(
+        small_model,
+        n_samples=5,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_sampler='nuts',
+        phi_hmc_step_size=0.01,
+        phi_nuts_max_tree_depth=4,
+        seed=42,
+    )
+    assert samples.shape == (5, len(small_model.x0))
+    assert phi_samples.shape == (5, n_phi)
+    assert logp.shape == (5,)
+    assert accepts.shape == (5,)
+    assert isinstance(final_step, float)
+    assert np.all(np.isfinite(phi_samples))
+    assert not np.allclose(phi_samples[0], phi_samples[-1])
+
+
+@skip_no_tfp
 def test_gibbs_chain_cg_with_phi_block_moves(small_model):
     """Phase 2 gate-2 exactness experiment (ROADMAP.md Section 1): Block 2
     ('cg', unlensed exact Gaussian draw) alongside Block 3 (phi | alm, C_l,
@@ -470,6 +506,285 @@ def test_build_phi_posterior_mass_sqrt_increases_with_fisher_curvature():
 
     assert np.all(with_fisher >= zero_fisher - 1e-30)
     assert np.any(with_fisher > zero_fisher * 1.5)
+
+
+# ── phi block mass matrix (cross-L Nystrom correction) ──────────────────────
+
+def test_build_phi_block_mass_chol_reduces_to_diagonal_when_hessian_empty():
+    """build_phi_block_mass_chol with an empty block_hessian dict must give
+    block Cholesky factors R whose diagonal reproduces
+    build_phi_posterior_mass_sqrt exactly (each block's precision is then
+    purely diagonal, so R's diagonal is just sqrt(precision) -- the same
+    degrade-to-diagonal contract PhiWhitener relies on for its initial,
+    pre-warmup state to match phi_mass_matrix='prior'/'fisher')."""
+    from diffcmb.samplers import (
+        _alm_index_lm,
+        build_phi_block_mass_chol,
+        build_phi_posterior_mass_sqrt,
+    )
+
+    lmax = 10
+    rng = np.random.default_rng(2)
+    cl_phiphi_full = rng.uniform(1e-12, 1e-10, size=lmax)
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    diag_fisher_per_L = np.zeros(lmax)
+    diag_fisher_per_L[5] = 1e11
+
+    expected = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
+    block_chol = build_phi_block_mass_chol(lmax, cl_phiphi_full, diag_fisher_per_L, {})
+
+    n = n_real + n_imag
+    recovered = np.empty(n)
+    seen = np.zeros(n, dtype=bool)
+    for idx, R in block_chol:
+        np.testing.assert_allclose(R, np.diag(np.diag(R)), atol=1e-12)
+        recovered[idx] = np.diag(R)
+        seen[idx] = True
+    assert np.all(seen)
+    # rtol slightly looser than machine precision -- build_phi_block_mass_chol
+    # adds a small numerical jitter (1e-10 * trace/K) before the Cholesky for
+    # robustness against near-singular blocks (see its docstring), which is a
+    # deliberate, tiny perturbation, not a bug.
+    np.testing.assert_allclose(recovered, expected, rtol=1e-6)
+
+
+def test_build_phi_block_mass_chol_offdiag_from_hessian():
+    """A nonzero off-diagonal block_hessian entry must show up as a
+    nonzero off-diagonal element of the corresponding block's Cholesky
+    factor's reconstructed precision (R @ R.T) -- this is the whole point
+    of 'block' mode: representing curvature a diagonal mass matrix cannot."""
+    from diffcmb.samplers import _alm_index_lm, build_phi_block_mass_chol
+
+    lmax = 10
+    cl_phiphi_full = np.full(lmax, 1e-6)
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    diag_fisher_per_L = np.zeros(lmax)
+
+    # m=0 real block spans L=2..9 (8 entries) -- inject a coupling between
+    # its first two entries.
+    idx = np.where((m_arr == 0) & (np.arange(n_real + n_imag) < n_real))[0]
+    K = len(idx)
+    H = np.zeros((K, K))
+    # Diagonal precision here is ~1/cl_phiphi_full = 1e6 per entry; keep the
+    # injected coupling well below that so the 2x2 principal minor stays PSD.
+    H[0, 1] = H[1, 0] = 1e5
+    block_hessian = {("real", 0): (idx, H)}
+
+    block_chol = build_phi_block_mass_chol(lmax, cl_phiphi_full, diag_fisher_per_L, block_hessian)
+    found = False
+    for idx2, R in block_chol:
+        if np.array_equal(idx2, idx):
+            precision = R @ R.T
+            assert abs(precision[0, 1] - 1e5) < 1e-2
+            found = True
+    assert found
+
+
+def test_phi_whitener_diag_matches_elementwise_division():
+    """PhiWhitener's diag mode must be numerically identical to the plain
+    elementwise mass_sqrt division it replaces."""
+    from diffcmb.samplers import PhiWhitener
+
+    rng = np.random.default_rng(3)
+    mass_sqrt = rng.uniform(0.5, 2.0, size=20)
+    phi = rng.standard_normal(20)
+
+    w = PhiWhitener(mass_sqrt_np=mass_sqrt)
+    u = w.whiten_np(phi)
+    np.testing.assert_allclose(u, phi * mass_sqrt)
+    np.testing.assert_allclose(w.unwhiten_np(u), phi, atol=1e-10)
+
+
+@skip_no_tfp
+def test_phi_whitener_block_roundtrip_and_matches_diag_when_diagonal():
+    """PhiWhitener's block mode round-trips (unwhiten(whiten(phi)) == phi)
+    and, when the block Cholesky factors happen to be diagonal, its TF
+    unwhiten_tf must agree with the plain-diagonal elementwise division to
+    numerical precision -- the block path is a strict generalisation."""
+    import tensorflow as tf
+
+    from diffcmb.samplers import PhiWhitener, build_phi_block_mass_chol
+
+    lmax = 10
+    cl_phiphi_full = np.full(lmax, 1e-6)
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n = n_real + n_imag
+    diag_fisher_per_L = np.zeros(lmax)
+
+    block_chol = build_phi_block_mass_chol(lmax, cl_phiphi_full, diag_fisher_per_L, {})
+    w_block = PhiWhitener(block_chol=block_chol)
+    mass_sqrt = np.empty(n)
+    for idx, R in block_chol:
+        mass_sqrt[idx] = np.diag(R)
+    w_diag = PhiWhitener(mass_sqrt_np=mass_sqrt)
+
+    rng = np.random.default_rng(4)
+    phi = rng.standard_normal(n)
+    u_block = w_block.whiten_np(phi)
+    np.testing.assert_allclose(w_block.unwhiten_np(u_block), phi, atol=1e-8)
+
+    u_tf = tf.constant(u_block, dtype=tf.float64)
+    phi_from_block_tf = w_block.unwhiten_tf(u_tf).numpy()
+    phi_from_diag_tf = w_diag.unwhiten_tf(u_tf).numpy()
+    np.testing.assert_allclose(phi_from_block_tf, phi_from_diag_tf, atol=1e-8)
+    np.testing.assert_allclose(phi_from_block_tf, phi, atol=1e-8)
+
+
+@skip_no_tfp
+def test_gibbs_chain_phi_mass_matrix_block_moves(small_model):
+    """phi_mass_matrix='block' recomputes the phi mass matrix mid-burn-in
+    using estimate_phi_block_hessian and keeps running without breaking
+    the chain -- shapes/finiteness match the existing 'fisher' test."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+
+    samples, phi_samples, logp, accepts, final_step = run_gibbs_chain(
+        small_model,
+        n_samples=5,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        phi_mass_matrix='block',
+        phi_fisher_warmup_iter=2,
+        phi_fisher_n_probes=2,
+        phi_block_n_probes=2,
+        seed=42,
+    )
+    assert samples.shape == (5, len(small_model.x0))
+    assert phi_samples.shape == (5, n_phi)
+    assert logp.shape == (5,)
+    assert accepts.shape == (5,)
+    assert isinstance(final_step, float)
+    assert np.all(np.isfinite(phi_samples))
+    assert not np.allclose(phi_samples[0], phi_samples[-1])
+
+
+def test_gibbs_chain_sample_cl_phiphi_with_block_mass_matrix_moves(small_model):
+    """sample_cl_phiphi=True combined with phi_mass_matrix='block' IS
+    supported (2026-08-23, ROADMAP.md): unlike 'fisher', the block Nystrom
+    correction splits cleanly into a frozen likelihood-curvature part
+    (diag_fisher_per_L/block_hessian, independent of cl_phiphi_full) and a
+    cheap-to-rebuild diagonal prior-precision part that tracks the new
+    spectrum every sweep -- see run_gibbs_chain's docstring and the Step 3a
+    block-mode branch. Both blocks and Block 4 should run to completion and
+    actually move."""
+    from diffcmb import run_gibbs_chain
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    # phi_initial defaults to all-zeros, which (with only 5 burn-in sweeps)
+    # never moves far enough from S_L=0 for Block 4 to escape its numerical
+    # floor clip -- same fix as
+    # test_gibbs_chain_sample_cl_phiphi_moves_and_returns_extra_array above:
+    # start from a draw at the assumed prior scale instead.
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    is_real = np.arange(n_phi) < n_real
+    var = np.empty(n_phi)
+    real_idx = np.where(is_real)[0]
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    imag_idx = np.where(~is_real)[0]
+    var[imag_idx] = C0 / 2.0
+    phi_initial = np.random.default_rng(3).normal(scale=np.sqrt(var))
+
+    samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = run_gibbs_chain(
+        small_model,
+        n_samples=5,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_initial=phi_initial,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        phi_mass_matrix='block',
+        phi_fisher_warmup_iter=2,
+        phi_fisher_n_probes=2,
+        phi_block_n_probes=2,
+        sample_cl_phiphi=True,
+        seed=42,
+    )
+    assert samples.shape == (5, len(small_model.x0))
+    assert phi_samples.shape == (5, n_phi)
+    assert logp.shape == (5,)
+    assert accepts.shape == (5,)
+    assert isinstance(final_step, float)
+    assert cl_phiphi_samples.shape == (5, lmax - 2)
+    assert np.all(np.isfinite(phi_samples))
+    assert np.all(np.isfinite(cl_phiphi_samples))
+    assert not np.allclose(phi_samples[0], phi_samples[-1])
+    assert not np.allclose(cl_phiphi_samples[0], cl_phiphi_samples[-1])
+
+
+def test_build_phi_block_mass_chol_rebuild_keeps_frozen_hessian_updates_diagonal():
+    """The Step-3a every-sweep rebuild for phi_mass_matrix='block' +
+    sample_cl_phiphi calls build_phi_block_mass_chol again with a NEW
+    cl_phiphi_full but the SAME (frozen) diag_fisher_per_L/block_hessian.
+    Directly exercise that call pattern: the off-diagonal structure (from
+    block_hessian) must be preserved, while the diagonal precision must
+    change to track the new spectrum -- i.e. rebuilding is not a no-op, and
+    it is not silently discarding the frozen cross-L correction either."""
+    from diffcmb.samplers import build_phi_block_mass_chol
+
+    lmax = 6
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    diag_fisher_per_L = np.full(lmax, 0.1, dtype=np.float64)
+    # A block_hessian entry for (channel='real', m=0): couples all m=0 real
+    # coordinates together with off-diagonal curvature, same shape contract
+    # as estimate_phi_block_hessian's return value.
+    from diffcmb.samplers import _alm_index_lm
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    idx0 = np.where((m_arr == 0) & (np.arange(n_real + n_imag) < n_real))[0]
+    K = len(idx0)
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((K, K))
+    H = A @ A.T  # PSD, guaranteed nonzero off-diagonal with overwhelming probability
+    block_hessian = {("real", 0): (idx0, H)}
+
+    cl_a = np.full(lmax, 1e-6, dtype=np.float64)
+    cl_b = np.full(lmax, 1e-3, dtype=np.float64)  # different spectrum scale
+
+    chol_a = build_phi_block_mass_chol(lmax, cl_a, diag_fisher_per_L, block_hessian)
+    chol_b = build_phi_block_mass_chol(lmax, cl_b, diag_fisher_per_L, block_hessian)
+
+    # Find the (real, m=0) block in each rebuild's output.
+    def find_block(chol):
+        for idx, R in chol:
+            if np.array_equal(idx, idx0):
+                return R
+        raise AssertionError("(real, m=0) block missing from build_phi_block_mass_chol output")
+
+    R_a, R_b = find_block(chol_a), find_block(chol_b)
+    precision_a = R_a @ R_a.T
+    precision_b = R_b @ R_b.T
+
+    # Both retain nonzero off-diagonal structure from the frozen block_hessian...
+    off_diag_a = precision_a - np.diag(np.diag(precision_a))
+    off_diag_b = precision_b - np.diag(np.diag(precision_b))
+    assert not np.allclose(off_diag_a, 0.0)
+    assert not np.allclose(off_diag_b, 0.0)
+    # ...and that off-diagonal structure is identical (frozen, cl-independent).
+    np.testing.assert_allclose(off_diag_a, off_diag_b)
+    # But the diagonal changed to track the new spectrum (1/cl term differs).
+    assert not np.allclose(np.diag(precision_a), np.diag(precision_b))
 
 
 # ── run_gibbs_chain: phi_mass_matrix opt-in ('prior' default vs 'fisher') ────

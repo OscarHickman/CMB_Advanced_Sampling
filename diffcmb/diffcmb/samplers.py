@@ -699,6 +699,170 @@ def build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L):
     return mass_sqrt
 
 
+def build_phi_block_mass_chol(lmax, cl_phiphi_full, diag_fisher_per_L, block_hessian):
+    """Per-m-block Cholesky factors of the phi HMC precision matrix, adding
+    lensing.py::estimate_phi_block_hessian's cross-L Nystrom correction on
+    top of the diagonal prior+Fisher precision -- the structurally motivated
+    fix for the cross-L Hessian coupling that no diagonal mass matrix
+    ('prior' or 'fisher') can represent (see estimate_phi_block_hessian's
+    docstring; ROADMAP.md/achievements.md 2026-08-17).
+
+    Mirrors messenger.py::build_block_cholesky's block-by-m pattern (same
+    codebase precedent for the analogous alm Block-2 problem): each block's
+    precision = diag(1/cl_phiphi[L] + diag_fisher_per_L[L]) + H_nystrom,
+    symmetrized and lightly jittered before a dense Cholesky.
+
+    block_hessian : dict from estimate_phi_block_hessian, keyed
+        (channel, m) -> (idx, H_nystrom). A missing key (block_size < 2,
+        skipped there) falls back to the pure-diagonal precision for that
+        block, so this degrades gracefully to build_phi_posterior_mass_sqrt
+        wherever no cross-L estimate is available.
+
+    Returns
+    -------
+    block_chol : list of (idx, R) pairs, idx a sorted int array of
+        packed-phi positions, R the (K, K) lower-triangular Cholesky factor
+        (R @ R.T = block precision), ordered by increasing m within each
+        channel (real blocks first, then imag), matching
+        estimate_phi_block_hessian's dict iteration order.
+    """
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    channel_arr = np.array(["real"] * n_real + ["imag"] * n_imag)
+
+    def diag_precision(idx):
+        out = np.empty(len(idx), dtype=np.float64)
+        for k, i in enumerate(idx):
+            L = int(L_arr[i])
+            cl = max(float(cl_phiphi_full[L]) if L < len(cl_phiphi_full) else 1e-30, 1e-30)
+            out[k] = 1.0 / cl + float(diag_fisher_per_L[L])
+        return out
+
+    block_chol = []
+    for channel in ("real", "imag"):
+        chan_mask = channel_arr == channel
+        for m in sorted(np.unique(m_arr[chan_mask])):
+            idx = np.where(chan_mask & (m_arr == m))[0]
+            if len(idx) == 0:
+                continue
+            precision = np.diag(diag_precision(idx))
+            key = (channel, int(m))
+            if key in block_hessian:
+                idx_h, H = block_hessian[key]
+                assert np.array_equal(idx_h, idx), "block_hessian index ordering mismatch"
+                precision = precision + H
+            precision = 0.5 * (precision + precision.T)
+            jitter = 1e-10 * np.trace(precision) / max(len(idx), 1)
+            R = np.linalg.cholesky(precision + jitter * np.eye(len(idx)))
+            block_chol.append((idx, R))
+    return block_chol
+
+
+def _dense_grad_gather(u, idx, n):
+    """tf.gather(u, idx), but with a forced-dense gradient w.r.t. u (via
+    scatter_nd) instead of the IndexedSlices tf.gather's default gradient
+    produces. TFP's leapfrog integrator (tfp.mcmc.HamiltonianMonteCarlo)
+    compares the nested structure of the gradient it gets on different
+    calls within the same traced while_loop, and a gather feeding into a
+    triangular_solve inside PhiWhitener.unwhiten_tf was found to
+    nondeterministically switch between an IndexedSlices and a dense
+    Tensor gradient across those calls, raising "structures don't have the
+    same nested structure" (ValueError) at trace time for phi_mass_matrix
+    ='block'. Forcing scatter_nd's inherently-dense gradient sidesteps
+    this without changing any numerics (scatter_nd's gradient w.r.t. the
+    updates argument is exactly the gather this replaces).
+    """
+
+    @tf.custom_gradient
+    def _inner(u_):
+        y = tf.gather(u_, idx)
+
+        def grad(dy):
+            return tf.scatter_nd(idx[:, tf.newaxis], dy, [n])
+
+        return y, grad
+
+    return _inner(u)
+
+
+class PhiWhitener:
+    """Applies the phi HMC/NUTS/MCLMC preconditioning transform (phi =
+    unwhiten(u), u = whiten(phi)) behind one interface, so run_gibbs_chain's
+    integrator-facing code doesn't need to branch between the elementwise
+    'prior'/'fisher' diagonal and the block-by-m 'block' preconditioner
+    (build_phi_block_mass_chol) -- see ROADMAP.md/achievements.md
+    2026-08-17's cross-L Hessian coupling finding for why 'block' exists.
+
+    Diagonal mode wraps a plain per-coordinate mass_sqrt array (sqrt
+    precision; phi = u / mass_sqrt, unchanged from the pre-existing
+    behaviour). Block mode wraps per-m-block Cholesky factors R (R @ R.T =
+    block precision); phi = R^-T u per block via a triangular solve,
+    matching the diagonal case exactly when R happens to be diagonal (its
+    initial value before the block-Hessian warmup below runs).
+    """
+
+    def __init__(self, mass_sqrt_np=None, block_chol=None, n=None):
+        if block_chol is not None:
+            self.mode = "block"
+            self.n = n if n is not None else int(sum(len(idx) for idx, _ in block_chol))
+            self.block_chol = block_chol
+            self.block_chol_tf = [
+                (tf.constant(idx, dtype=tf.int32), tf.Variable(tf.constant(R, dtype=tf.float64)))
+                for idx, R in block_chol
+            ]
+        else:
+            self.mode = "diag"
+            self.n = len(mass_sqrt_np)
+            self.mass_sqrt_np = np.asarray(mass_sqrt_np, dtype=np.float64)
+            self.mass_sqrt_var = tf.Variable(tf.constant(self.mass_sqrt_np, dtype=tf.float64))
+
+    def whiten_np(self, phi_np):
+        if self.mode == "diag":
+            return phi_np * self.mass_sqrt_np
+        u = np.empty(self.n, dtype=np.float64)
+        for idx, R in self.block_chol:
+            u[idx] = R.T @ phi_np[idx]
+        return u
+
+    def unwhiten_np(self, u_np):
+        if self.mode == "diag":
+            return u_np / self.mass_sqrt_np
+        phi = np.empty(self.n, dtype=np.float64)
+        for idx, R in self.block_chol:
+            phi[idx] = np.linalg.solve(R.T, u_np[idx])
+        return phi
+
+    def unwhiten_tf(self, u_tf):
+        if self.mode == "diag":
+            return u_tf / self.mass_sqrt_var
+        idx_pieces, val_pieces = [], []
+        for idx_tf, R_var in self.block_chol_tf:
+            u_blk = _dense_grad_gather(u_tf, idx_tf, self.n)
+            x = tf.linalg.triangular_solve(
+                tf.transpose(R_var), u_blk[:, tf.newaxis], lower=False
+            )[:, 0]
+            idx_pieces.append(idx_tf)
+            val_pieces.append(x)
+        flat_idx = tf.concat(idx_pieces, axis=0)[:, tf.newaxis]
+        flat_val = tf.concat(val_pieces, axis=0)
+        return tf.scatter_nd(flat_idx, flat_val, [self.n])
+
+    def update_diag(self, mass_sqrt_np):
+        assert self.mode == "diag"
+        self.mass_sqrt_np = np.asarray(mass_sqrt_np, dtype=np.float64)
+        self.mass_sqrt_var.assign(tf.constant(self.mass_sqrt_np, dtype=tf.float64))
+
+    def update_block(self, block_chol_new):
+        assert self.mode == "block"
+        for (idx_old, _), (idx_new, R_new), (_, R_var) in zip(
+            self.block_chol, block_chol_new, self.block_chol_tf
+        ):
+            assert np.array_equal(idx_old, idx_new), "block_chol index ordering changed"
+            R_var.assign(tf.constant(R_new, dtype=tf.float64))
+        self.block_chol = block_chol_new
+
+
 def build_phi_mclmc_step(phi_log_prob_whitened, phi_step_size_var, phi_mclmc_l, phi_n_lfs):
     """Build the traced Block-3 MCLMC per-sweep step closure.
 
@@ -751,9 +915,12 @@ def run_gibbs_chain(
     phi_mass_matrix='prior',
     phi_fisher_warmup_iter=20,
     phi_fisher_n_probes=8,
+    phi_block_n_probes=6,
     sample_cl_phiphi=False,
     phi_sampler='hmc',
     phi_mclmc_L=1.0,
+    phi_nuts_max_tree_depth=10,
+    phi_nuts_max_energy_diff=1000.0,
 ):
     """Gibbs sampler alternating exact C_l | alm (inverse-Gamma) + alm | C_l steps.
 
@@ -801,23 +968,48 @@ def run_gibbs_chain(
     barely mixing at production lmax (ROADMAP.md's "Simulation validation"
     entry, achievements.md).
 
+    'block' (2026-08-18, ROADMAP.md/achievements.md) additionally folds in
+    lensing.py::estimate_phi_block_hessian's cross-L Nystrom correction,
+    computed at the same `phi_fisher_warmup_iter` burn-in point using
+    `phi_block_n_probes` coordinate samples per m-block -- the structurally
+    motivated fix for the cross-L Hessian coupling
+    diagnose_phi_hessian_coupling.py found significant (mean coupling ratios
+    0.263/0.621 between L-bins [60,lmax) and [10,30), up to 0.97 at
+    individual chain points), which no diagonal-in-L mass matrix ('prior' or
+    'fisher') can represent regardless of tuning. Applied via
+    PhiWhitener/build_phi_block_mass_chol's per-m block Cholesky rather than
+    an elementwise mass_sqrt. `diag_fisher_per_L`/`block_hessian` (the two
+    gradient-eval-expensive quantities) are burn-in-only, frozen thereafter --
+    but ARE supported with `sample_cl_phiphi=True` (below), unlike 'fisher':
+    both are estimates of LIKELIHOOD curvature, independent of cl_phiphi_full,
+    so freezing them is exact regardless of how many times Block 4 resamples
+    the spectrum afterwards; only the diagonal 1/cl_phiphi(L) prior-precision
+    term the new spectrum feeds is rebuilt every sweep (cheap: a per-m-block
+    Cholesky, no new gradient evals) -- see the `sample_cl_phiphi` entry below
+    (ROADMAP.md, 2026-08-23 -- lmax=64 GO used Block 4 off; this combination
+    has not yet itself been gated).
+
     `sample_cl_phiphi` (opt-in, default False, requires `cl_phiphi_full` to
     also be given): adds a fourth Gibbs step, `C_L^phiphi | phi`, an exact
     inverse-Gamma draw with the same structure as Block 1 (see
     lensing.py::compute_sl_phi_np / sample_cl_phiphi_given_phi). When enabled,
     `cl_phiphi_full` is used only as the initial spectrum; from then on it is
     resampled every sweep from the current phi state (same pattern as
-    `current_lncl`/`mass_sqrt_np` for the alm block), the phi HMC mass matrix
-    is rebuilt from the new spectrum each sweep via build_phi_prior_mass_sqrt,
-    and phi's whitened HMC state is rescaled to match -- mirroring exactly
-    how `state_var`/`mass_sqrt_var` are rebuilt every sweep for the alm block.
-    Returns an additional `cl_phiphi_samples` array (shape (n_samples,
-    lmax-2), log-spectrum per sample) as the last element of the return
-    tuple. Not currently supported together with `phi_mass_matrix='fisher'`
-    (raises ValueError) -- the Fisher-informed mass matrix is estimated once
-    at burn-in and frozen thereafter, and combining that with a spectrum that
-    keeps changing every sweep would need its own validation this change does
-    not attempt.
+    `current_lncl`/`mass_sqrt_np` for the alm block). The phi HMC mass matrix
+    is rebuilt from the new spectrum each sweep: for `phi_mass_matrix='prior'`
+    (default) via build_phi_prior_mass_sqrt; for `'block'`, via
+    build_phi_block_mass_chol reusing the frozen diag_fisher_per_L/
+    block_hessian curvature estimates from burn-in (see above) with the new
+    spectrum's diagonal term. Either way phi's whitened HMC state is rescaled
+    to match -- mirroring exactly how `state_var`/`mass_sqrt_var` are rebuilt
+    every sweep for the alm block. Returns an additional `cl_phiphi_samples`
+    array (shape (n_samples, lmax-2), log-spectrum per sample) as the last
+    element of the return tuple. Still not supported together with
+    `phi_mass_matrix='fisher'` (raises ValueError) -- the same
+    frozen-diagonal-Fisher + rebuilt-diagonal-prior trick used for 'block'
+    above would apply equally to 'fisher' in principle, but that combination
+    is out of scope for this change (not requested, not tested) and remains
+    disallowed rather than silently untested.
 
     `phi_sampler` (opt-in, default 'hmc', requires `cl_phiphi_full` to also be
     given): selects the Block 3 integrator. 'hmc' is the validated production
@@ -839,6 +1031,27 @@ def run_gibbs_chain(
     resulting `phi_mass_sqrt_np`/`phi_state_var`. Still requires
     `sample_cl_phiphi=False` (Block 4 off), same reasoning as the
     HMC+fisher+Block4 guard above.
+
+    `phi_sampler='nuts'` (2026-08-17 spike, ROADMAP.md -- every fixed-step-size
+    tuning attempt on the phi block, HMC and MCLMC alike, has failed the
+    equilibration gate regardless of lmax/window/trajectory-length; this
+    tests whether a dynamic trajectory length fixes it rather than another
+    fixed-schedule tuning pass) drives Block 3 with `tfp.mcmc.NoUTurnSampler`
+    (no `phi_n_lfs` -- NUTS picks its own trajectory length per step via the
+    no-U-turn criterion, controlled instead by `phi_nuts_max_tree_depth`/
+    `phi_nuts_max_energy_diff`). Deliberately reuses the *same* external
+    Robbins-Monro step-size adaptation already validated for the HMC path
+    (the `phi_step_float`/`phi_target_accept` loop below), rather than TFP's
+    own `DualAveragingStepSizeAdaptation` wrapper -- that wrapper's internal
+    adaptation state (step count, running average) would need to persist
+    across sweeps to work as intended, but this Gibbs loop calls
+    `bootstrap_results` fresh every sweep (the target log-prob's alm/C_l
+    conditioning changes every sweep, so a stale `kernel_results` would carry
+    a wrong `target_log_prob` -- same reason the HMC branch does this), which
+    would silently reset dual-averaging's adaptation state every single sweep
+    and never let it converge. The externally-tracked scalar `phi_step_float`
+    has no such problem: it is plain Python state, carried across sweeps (and
+    checkpoints) explicitly.
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
@@ -851,17 +1064,20 @@ def run_gibbs_chain(
         raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc' or 'cg'")
     if sample_cl_phiphi and not sample_phi:
         raise ValueError("sample_cl_phiphi=True (Block 4) requires cl_phiphi_full to be given")
+    if phi_mass_matrix not in ('prior', 'fisher', 'block'):
+        raise ValueError(f"phi_mass_matrix must be 'prior', 'fisher', or 'block', got {phi_mass_matrix!r}")
     if sample_cl_phiphi and phi_mass_matrix == 'fisher':
         raise ValueError(
-            "sample_cl_phiphi=True is not supported together with "
-            "phi_mass_matrix='fisher' -- the Fisher-informed mass matrix is "
-            "estimated once at burn-in and frozen thereafter, which would be "
-            "inconsistent with a spectrum that keeps changing every sweep"
+            f"sample_cl_phiphi=True is not supported together with "
+            f"phi_mass_matrix={phi_mass_matrix!r} -- the Fisher-informed "
+            f"mass matrix is estimated once at burn-in and frozen thereafter, "
+            f"which would be inconsistent with a spectrum that keeps changing "
+            f"every sweep"
         )
-    if phi_sampler not in ('hmc', 'mclmc'):
-        raise ValueError(f"phi_sampler must be 'hmc' or 'mclmc', got {phi_sampler!r}")
-    if phi_sampler == 'mclmc' and not sample_phi:
-        raise ValueError("phi_sampler='mclmc' requires cl_phiphi_full (Block 3) to be given")
+    if phi_sampler not in ('hmc', 'mclmc', 'nuts'):
+        raise ValueError(f"phi_sampler must be 'hmc', 'mclmc', or 'nuts', got {phi_sampler!r}")
+    if phi_sampler in ('mclmc', 'nuts') and not sample_phi:
+        raise ValueError(f"phi_sampler={phi_sampler!r} requires cl_phiphi_full (Block 3) to be given")
     if phi_sampler == 'mclmc' and phi_mass_matrix == 'fisher' and sample_cl_phiphi:
         raise ValueError(
             "phi_sampler='mclmc' + phi_mass_matrix='fisher' is only "
@@ -953,7 +1169,7 @@ def run_gibbs_chain(
             # on, never mutating the caller's original array.
             cl_phiphi_full = np.array(cl_phiphi_full, dtype=np.float64).copy()
 
-    phi_fisher_done = phi_mass_matrix != 'fisher'  # already "done" -- no-op
+    phi_fisher_done = phi_mass_matrix not in ('fisher', 'block')  # already "done" -- no-op
 
     n_collected = len(samples_out)
     n_samples_remaining = n_samples - n_collected
@@ -990,6 +1206,7 @@ def run_gibbs_chain(
 
     if sample_phi:
         from .lensing import (
+            estimate_phi_block_hessian,
             estimate_phi_diag_fisher,
             log_prob_phi_block,
             psi_lensed,
@@ -997,10 +1214,21 @@ def run_gibbs_chain(
         )
 
         model._ensure_tf_tensors()
-        phi_mass_sqrt_np = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
-        phi_mass_sqrt_var = tf.Variable(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
+        if phi_mass_matrix == 'block':
+            # Starts diagonal (prior-only, zero Fisher) -- identical to
+            # 'prior' -- and is upgraded in-place via PhiWhitener.update_block
+            # once the burn-in warmup below computes the cross-L Nystrom
+            # correction, exactly mirroring how 'fisher' starts from the
+            # same prior-only mass_sqrt and is upgraded at phi_fisher_done.
+            phi_whitener = PhiWhitener(
+                block_chol=build_phi_block_mass_chol(
+                    lmax, cl_phiphi_full, np.zeros(lmax, dtype=np.float64), {}
+                )
+            )
+        else:
+            phi_whitener = PhiWhitener(mass_sqrt_np=build_phi_prior_mass_sqrt(lmax, cl_phiphi_full))
         phi_state_var = tf.Variable(
-            tf.constant(phi_current_np * phi_mass_sqrt_np, dtype=tf.float64)
+            tf.constant(phi_whitener.whiten_np(phi_current_np), dtype=tf.float64)
         )
         phi_step_size_var = tf.Variable(phi_step_float, dtype=tf.float64)
         # Mirrors mass_sqrt_var/lncl_var below: a tf.Variable twin of the
@@ -1030,7 +1258,7 @@ def run_gibbs_chain(
             alm = u / mass_sqrt_var
             full_params = tf.concat([lncl_var[2:], alm], axis=0)
             if sample_phi:
-                phi_packed = phi_state_var / phi_mass_sqrt_var
+                phi_packed = phi_whitener.unwhiten_tf(phi_state_var)
                 return -psi_lensed(model, full_params, phi_packed)
             return -model.psi_tf(full_params)
 
@@ -1069,7 +1297,7 @@ def run_gibbs_chain(
 
         if sample_phi:
             def phi_log_prob_whitened(u):
-                phi_packed = u / phi_mass_sqrt_var
+                phi_packed = phi_whitener.unwhiten_tf(u)
                 full_params = tf.concat([lncl_var[2:], state_var / mass_sqrt_var], axis=0)
                 return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
@@ -1077,6 +1305,18 @@ def run_gibbs_chain(
                 phi_mclmc_bootstrap_and_step = build_phi_mclmc_step(
                     phi_log_prob_whitened, phi_step_size_var, phi_mclmc_L, phi_n_lfs
                 )
+            elif phi_sampler == 'nuts':
+                phi_nuts_kernel = tfp.mcmc.NoUTurnSampler(
+                    target_log_prob_fn=phi_log_prob_whitened,
+                    step_size=phi_step_size_var,
+                    max_tree_depth=phi_nuts_max_tree_depth,
+                    max_energy_diff=phi_nuts_max_energy_diff,
+                )
+
+                @tf.function
+                def phi_nuts_bootstrap_and_step(state):
+                    pkr = phi_nuts_kernel.bootstrap_results(state)
+                    return phi_nuts_kernel.one_step(state, pkr)
             else:
                 phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
                     target_log_prob_fn=phi_log_prob_whitened,
@@ -1099,7 +1339,7 @@ def run_gibbs_chain(
             cg_alm_var = tf.Variable(tf.constant(current_alm_np, dtype=tf.float64))
 
             def phi_log_prob_whitened(u):
-                phi_packed = u / phi_mass_sqrt_var
+                phi_packed = phi_whitener.unwhiten_tf(u)
                 full_params = tf.concat([cg_lncl_var[2:], cg_alm_var], axis=0)
                 return log_prob_phi_block(model, full_params, phi_packed, cl_phiphi_full_var)
 
@@ -1107,6 +1347,18 @@ def run_gibbs_chain(
                 phi_mclmc_bootstrap_and_step = build_phi_mclmc_step(
                     phi_log_prob_whitened, phi_step_size_var, phi_mclmc_L, phi_n_lfs
                 )
+            elif phi_sampler == 'nuts':
+                phi_nuts_kernel = tfp.mcmc.NoUTurnSampler(
+                    target_log_prob_fn=phi_log_prob_whitened,
+                    step_size=phi_step_size_var,
+                    max_tree_depth=phi_nuts_max_tree_depth,
+                    max_energy_diff=phi_nuts_max_energy_diff,
+                )
+
+                @tf.function
+                def phi_nuts_bootstrap_and_step(state):
+                    pkr = phi_nuts_kernel.bootstrap_results(state)
+                    return phi_nuts_kernel.one_step(state, pkr)
             else:
                 phi_hmc_kernel = tfp.mcmc.HamiltonianMonteCarlo(
                     target_log_prob_fn=phi_log_prob_whitened,
@@ -1118,6 +1370,19 @@ def run_gibbs_chain(
                 def phi_hmc_bootstrap_and_step(state):
                     pkr = phi_hmc_kernel.bootstrap_results(state)
                     return phi_hmc_kernel.one_step(state, pkr)
+
+    # Frozen curvature estimates for phi_mass_matrix='block' + sample_cl_phiphi
+    # (Block 4): diag_fisher_per_L/block_hessian are expensive (gradient-eval)
+    # one-time burn-in estimates of LIKELIHOOD curvature, independent of
+    # cl_phiphi_full -- correct to freeze regardless of how many times Block 4
+    # resamples the spectrum afterwards. Persisted here (not just local to the
+    # warmup block below) so Step 3a can cheaply rebuild the Cholesky each
+    # sweep from the frozen curvature + the NEW cl_phiphi_full, mirroring how
+    # the 'prior'/'fisher' diagonal case already rebuilds every sweep via
+    # build_phi_prior_mass_sqrt -- see the sample_cl_phiphi block-mode branch
+    # below and its docstring note (ROADMAP.md, 2026-08-23).
+    frozen_diag_fisher_per_L = np.zeros(lmax, dtype=np.float64)
+    frozen_block_hessian = {}
 
     recent = []
     resume_tag = "resuming, " if resuming else ""
@@ -1194,7 +1459,7 @@ def run_gibbs_chain(
 
         recent.append(accepted)
 
-        # --- Fisher-informed phi mass matrix (opt-in, one-time recompute) ---
+        # --- Fisher-informed / block phi mass matrix (opt-in, one-time recompute) ---
         # Waits until phi_fisher_warmup_iter so the chain state has moved
         # past the literal warm-start point before measuring curvature there.
         if sample_phi and not phi_fisher_done and is_burnin and i >= min(
@@ -1204,18 +1469,28 @@ def run_gibbs_chain(
                 state_var.numpy() / mass_sqrt_np if alm_sampler == 'hmc' else current_alm_np
             )
             full_params_now = np.concatenate([current_lncl, alm_now])
-            phi_now = phi_state_var.numpy() / phi_mass_sqrt_np
+            phi_now = phi_whitener.unwhiten_np(phi_state_var.numpy())
+            full_params_tf = tf.constant(full_params_now, dtype=tf.float64)
+            phi_now_tf = tf.constant(phi_now, dtype=tf.float64)
             diag_fisher_per_L = estimate_phi_diag_fisher(
-                model,
-                tf.constant(full_params_now, dtype=tf.float64),
-                tf.constant(phi_now, dtype=tf.float64),
-                lmax,
-                n_probes=phi_fisher_n_probes,
-                rng=rng,
+                model, full_params_tf, phi_now_tf, lmax,
+                n_probes=phi_fisher_n_probes, rng=rng,
             )
-            phi_mass_sqrt_np = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
-            phi_state_var.assign(tf.constant(phi_now * phi_mass_sqrt_np, dtype=tf.float64))
-            phi_mass_sqrt_var.assign(tf.constant(phi_mass_sqrt_np, dtype=tf.float64))
+            if phi_mass_matrix == 'block':
+                block_hessian = estimate_phi_block_hessian(
+                    model, full_params_tf, phi_now_tf, lmax,
+                    n_probes=phi_block_n_probes, rng=rng,
+                )
+                new_block_chol = build_phi_block_mass_chol(
+                    lmax, cl_phiphi_full, diag_fisher_per_L, block_hessian
+                )
+                phi_whitener.update_block(new_block_chol)
+                frozen_diag_fisher_per_L = diag_fisher_per_L
+                frozen_block_hessian = block_hessian
+            else:
+                phi_mass_sqrt_np = build_phi_posterior_mass_sqrt(lmax, cl_phiphi_full, diag_fisher_per_L)
+                phi_whitener.update_diag(phi_mass_sqrt_np)
+            phi_state_var.assign(tf.constant(phi_whitener.whiten_np(phi_now), dtype=tf.float64))
             phi_fisher_done = True
 
         # --- Step 3a: C_L^phiphi | phi (opt-in, optional Block 4) ---
@@ -1231,15 +1506,31 @@ def run_gibbs_chain(
         # update too (a plain Python rebind is invisible to an already-traced
         # graph, but a tf.Variable .assign() is read live at call time).
         if sample_cl_phiphi:
-            phi_now_np = phi_state_var.numpy() / phi_mass_sqrt_np
+            phi_now_np = phi_whitener.unwhiten_np(phi_state_var.numpy())
             new_lncl_phiphi = sample_cl_phiphi_given_phi(phi_now_np, lmax, rng)
             cl_phiphi_full = cl_phiphi_full.copy()
             cl_phiphi_full[2:lmax] = np.exp(new_lncl_phiphi)
             cl_phiphi_full_var.assign(tf.constant(cl_phiphi_full, dtype=tf.float64))
-            new_phi_mass_sqrt = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
-            phi_state_var.assign(tf.constant(phi_now_np * new_phi_mass_sqrt, dtype=tf.float64))
-            phi_mass_sqrt_var.assign(tf.constant(new_phi_mass_sqrt, dtype=tf.float64))
-            phi_mass_sqrt_np = new_phi_mass_sqrt
+            if phi_whitener.mode == 'block':
+                # Rebuild the per-m-block Cholesky from the NEW spectrum, but
+                # reuse the frozen diag_fisher_per_L/block_hessian curvature
+                # estimates from burn-in (or the zero/{} pre-warmup
+                # placeholder) rather than re-estimating them -- those are
+                # LIKELIHOOD-curvature quantities (estimate_phi_diag_fisher/
+                # estimate_phi_block_hessian, both independent of
+                # cl_phiphi_full), correct to freeze while only the
+                # 1/cl_phiphi(L) prior-precision term the new spectrum feeds
+                # gets updated every sweep. This costs only a per-m-block
+                # Cholesky (no new gradient evals), mirroring the 'prior'/
+                # 'fisher' diagonal case's cheap every-sweep rebuild below.
+                new_block_chol = build_phi_block_mass_chol(
+                    lmax, cl_phiphi_full, frozen_diag_fisher_per_L, frozen_block_hessian
+                )
+                phi_whitener.update_block(new_block_chol)
+            else:
+                new_phi_mass_sqrt = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
+                phi_whitener.update_diag(new_phi_mass_sqrt)
+            phi_state_var.assign(tf.constant(phi_whitener.whiten_np(phi_now_np), dtype=tf.float64))
 
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:
@@ -1258,6 +1549,21 @@ def run_gibbs_chain(
                 # docstring above: this is a bounded spike, not a new
                 # adaptive scheme.
                 phi_accepted = not bool(mclmc_diag.diverged.numpy())
+            elif phi_sampler == 'nuts':
+                new_phi_state, new_phi_pkr = phi_nuts_bootstrap_and_step(phi_state_var)
+                phi_state_var.assign(new_phi_state)
+                phi_accepted = bool(new_phi_pkr.is_accepted.numpy())
+
+                if is_burnin:
+                    # Same external Robbins-Monro step-size adaptation as the
+                    # HMC branch below -- see run_gibbs_chain's docstring for
+                    # why TFP's own DualAveragingStepSizeAdaptation wrapper
+                    # isn't used here (its internal adaptation state can't
+                    # survive this loop's per-sweep bootstrap_results calls).
+                    gamma = 1.0 / ((i + 1) ** 0.6)
+                    log_step = np.log(phi_step_float) + gamma * (float(phi_accepted) - phi_target_accept)
+                    phi_step_float = float(np.clip(np.exp(log_step), 1e-7, 2.0))
+                    phi_step_size_var.assign(phi_step_float)
             else:
                 new_phi_state, new_phi_pkr = phi_hmc_bootstrap_and_step(phi_state_var)
                 phi_state_var.assign(new_phi_state)
@@ -1281,7 +1587,7 @@ def run_gibbs_chain(
             logp_out.append(logp_val)
             accepts_out.append(accepted)
             if sample_phi:
-                phi_sample = phi_state_var.numpy() / phi_mass_sqrt_np
+                phi_sample = phi_whitener.unwhiten_np(phi_state_var.numpy())
                 phi_samples_out.append(phi_sample)
                 phi_accepts_out.append(phi_accepted)
                 if sample_cl_phiphi:

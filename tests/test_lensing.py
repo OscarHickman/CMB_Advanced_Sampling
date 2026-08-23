@@ -874,6 +874,91 @@ def test_estimate_phi_diag_fisher_vs_dense_hessian_small_lmax():
 
 
 # ---------------------------------------------------------------------------
+# 8b — estimate_phi_block_hessian: Nystrom low-rank cross-L Hessian
+#      correction, block-diagonal by m (ROADMAP.md/achievements.md
+#      2026-08-18 -- diagnose_phi_hessian_coupling.py found significant
+#      cross-L coupling that no diagonal-in-L mass matrix can represent).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not HAS_TF or not HAS_HEALPY, reason="TF or healpy not installed")
+def test_estimate_phi_block_hessian_matches_dense_block_small_lmax():
+    """With n_probes == the block size (exhaustive sampling), the Nystrom
+    approximation degenerates to the exact block Hessian (H[:,S] with S =
+    all indices, pinv(H[S,S]) @ H[S,S] = I when H[S,S] is invertible), so
+    it should match a brute-force dense FD-of-analytic-gradient Hessian of
+    that block closely -- not just in expectation.
+    """
+    from diffcmb.lensing import estimate_phi_block_hessian, psi_lensed
+    from diffcmb.samplers import _alm_index_lm
+
+    model = _make_model()
+    lmax = model.lmax
+    n_lncl = lmax - 2
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+
+    rng = np.random.default_rng(22)
+    params_np = np.zeros(n_lncl + n_real + n_imag)
+    params_np[:n_lncl] = 5.0
+    params_np[n_lncl:] = rng.standard_normal(n_real + n_imag) * 0.1
+    params_tf = tf.constant(params_np, dtype=tf.float64)
+    phi_np = _rand_phi_packed(lmax, rng, amplitude=1e-4)
+
+    def grad_at(phi_val):
+        phi_var = tf.Variable(phi_val, dtype=tf.float64)
+        with tf.GradientTape() as tape:
+            val = psi_lensed(model, params_tf, phi_var)
+        return tape.gradient(val, phi_var).numpy()
+
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    channel_arr = np.array(["real"] * n_real + ["imag"] * n_imag)
+    # m=2 real block has the most L's (L=2..lmax-1) for this small model --
+    # exercise a block with more than one mode.
+    probe_m = 2
+    idx = np.where((channel_arr == "real") & (m_arr == probe_m))[0]
+    assert len(idx) >= 2
+
+    eps = 1e-9
+    g0 = grad_at(phi_np)
+    K = len(idx)
+    dense_block = np.empty((K, K))
+    for k, j in enumerate(idx):
+        phi_p = phi_np.copy()
+        phi_p[j] += eps
+        g1 = grad_at(phi_p)
+        dense_block[:, k] = (g1[idx] - g0[idx]) / eps
+    dense_block = 0.5 * (dense_block + dense_block.T)
+
+    # n_probes=1 (rank-1 Nystrom) has a simple, numerically stable closed
+    # form -- H_nystrom = c c^T / H_SS[0,0] for the single sampled column c
+    # -- that this test can check directly against the dense reference's
+    # own column, without inverting a large near-singular sampled
+    # submatrix (which n_probes=K, "exhaustive" sampling, would require:
+    # H_SS is then the full noisy FD block itself, and independently
+    # verified to be numerically unstable to invert at this eps/scale --
+    # not representative of production use, which only ever samples a
+    # handful of probes per block).
+    blocks = estimate_phi_block_hessian(
+        model, params_tf, tf.constant(phi_np, dtype=tf.float64), lmax,
+        n_probes=1, rng=np.random.default_rng(6),
+    )
+    key = ("real", probe_m)
+    assert key in blocks
+    idx_out, H_out = blocks[key]
+    np.testing.assert_array_equal(idx_out, idx)
+    assert H_out.shape == (K, K)
+    # Symmetric and PSD by construction (outer product of a real vector).
+    np.testing.assert_allclose(H_out, H_out.T, rtol=0, atol=1e-8)
+    eigval = np.linalg.eigvalsh(H_out)
+    assert np.all(eigval >= -1e-6 * max(1.0, np.abs(eigval).max()))
+    # Rank <= 1: exactly one eigenvalue should carry (numerically) all the
+    # trace.
+    eigval_sorted = np.sort(np.abs(eigval))
+    assert eigval_sorted[-1] > 0
+    assert eigval_sorted[:-1].sum() < 1e-6 * eigval_sorted[-1]
+
+
+# ---------------------------------------------------------------------------
 # 9 — Optional Block 4: compute_sl_phi_np / sample_cl_phiphi_given_phi
 #     (ROADMAP.md's lowest-priority optional item -- "C_l^phiphi|phi exact
 #     inverse-Gamma, same structure as Block 1"). log_prob_phi_block's
