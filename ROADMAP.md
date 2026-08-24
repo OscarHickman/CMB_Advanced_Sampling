@@ -19,6 +19,17 @@
 
 ### ⟹ NEXT SESSION — read this first
 
+### 🛑 2026-08-24: alm ordering bug found — every φ-block result below is invalid
+
+`lensing.py`'s `_alm_packed_to_hp`/`_alm_hp_to_packed` never called `almmotho`/`almhotmo`, so the packed φ vector was handed to healpy/ducc in author (L-major) ordering while they read m-major. Every coefficient sat at the wrong multipole; the per-ℓ prior in Blocks 1 and 4 was applied to modes the likelihood placed elsewhere. Fixed and covered by two new absolute-(L,m) tests (`achievements.md` has the full entry and why the round-trip test could never catch it).
+
+**Consequences — do this before trusting anything in the sections below:**
+
+1. **Every φ-block number recorded in this file and in `achievements.md` predates the fix and must be re-derived**, including the lag-1 autocorrelations quoted below (0.557, 0.945, 0.996), the `phi_mass_matrix='block'` GO at lmax=64, and the NUTS/MCLMC/Fisher NO-GOs. The *closed-out routes* list should be treated as provisional: those methods were judged against a scrambled target.
+2. **This is the leading candidate explanation for the φ-block pathology itself.** A prior that is diagonal in code-ℓ acting on a likelihood that is diagonal in sky-ℓ produces exactly the kind of geometry no mass matrix can precondition — which is what the entire Nystrom/Fisher apparatus was built to chase. Re-run the plain-HMC baseline *first*, before assuming any of that machinery is still needed.
+3. Ensemble array `11848757` was launched against the broken path and should be cancelled and resubmitted.
+4. The non-centred (φ, C_L^φφ) rescaling move (`phi_rescale_move`, commit `f606929`) is unit-tested and correct on its own terms, but the funnel diagnosis that motivated it rests on the invalid 0.557→0.945 comparison. Re-establish that comparison post-fix before spending pilot compute on the move.
+
 **φ-block equilibration: the production configuration (lmax=64, Block 4 ON) is NO-GO, harvested 2026-08-24 (job 11836793).** Worst lag-1 autocorrelation 0.945 (gate <0.9), in bin `[30,60)` — up from 0.557 with Block 4 off (job 11781626, same lmax=64 setup). Turning Block 4 on materially degrades φ mixing even at the scale that previously passed. This confirms the risk flagged when the guard was relaxed: coupling low-L φ amplitudes to a resampled C_L^φφ hurts equilibration, though the worst bin is mid-L `[30,60)` here, not low-L as at lmax=128. Full detail: `achievements.md`. **Per the standing no-unilateral-tuning rule, do not launch another φ-equilibration pilot without asking first** — report this to the user and get direction (their preference order was: drop lmax further, lengthen the window, or raise `phi_n_lfs`).
 
 - Root cause + fix at lmax=64, both closed (`achievements.md`): the φ-block posterior has cross-L Hessian coupling no diagonal-in-L mass matrix can represent; `phi_mass_matrix='block'` (a per-m-block Nystrom correction) fixes it there. NUTS alone does not (job 11781382, NO-GO) — confirms it was never a trajectory-length problem.

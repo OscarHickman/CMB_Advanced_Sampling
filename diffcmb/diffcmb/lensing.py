@@ -34,6 +34,12 @@ except ImportError:
     hp = None
 
 try:
+    from .alm_utils import almhotmo, almmotho
+except ImportError:  # pragma: no cover - alm_utils needs healpy/scipy
+    almhotmo = None
+    almmotho = None
+
+try:
     import tensorflow as tf
 except ImportError:
     tf = None
@@ -47,6 +53,14 @@ except ImportError:
 #   imag_parts[...] : Im(a_{L,m})  for m≥2 only  (m=0,1 imaginary is forced to 0)
 #
 # This matches splittosingularalm / splittosingularalm_tf exactly.
+#
+# ORDERING: the packed layout is L-major ("author ordering", mo), the same as
+# model.py.  healpy and ducc0 alm arrays are m-major (ho, hp.Alm.getidx).  The
+# two conversions below MUST route through almmotho/almhotmo -- indexing a
+# healpy-ordered array with the author-ordering formula L*(L+1)//2 + m is a
+# bijection, so the packed→hp→packed round-trip still looks lossless while
+# every coefficient sits at the wrong multipole on the sky.  See
+# test_alm_hp_to_packed_uses_true_healpy_ordering.
 # ---------------------------------------------------------------------------
 
 def _alm_packed_to_hp(phi_packed: np.ndarray, lmax: int) -> np.ndarray:
@@ -55,20 +69,20 @@ def _alm_packed_to_hp(phi_packed: np.ndarray, lmax: int) -> np.ndarray:
     real_p = phi_packed[:n_real]
     imag_p = phi_packed[n_real:]
     len_alm = lmax * (lmax + 1) // 2
-    alm_hp = np.zeros(len_alm, dtype=np.complex128)
+    alm_mo = np.zeros(len_alm, dtype=np.complex128)
     r_idx = 0
     i_idx = 0
     for L in range(2, lmax):
         for m in range(L + 1):
-            ho_idx = L * (L + 1) // 2 + m
+            mo_idx = L * (L + 1) // 2 + m
             if m <= 1:
-                alm_hp[ho_idx] = real_p[r_idx]
+                alm_mo[mo_idx] = real_p[r_idx]
                 r_idx += 1
             else:
-                alm_hp[ho_idx] = real_p[r_idx] + 1j * imag_p[i_idx]
+                alm_mo[mo_idx] = real_p[r_idx] + 1j * imag_p[i_idx]
                 r_idx += 1
                 i_idx += 1
-    return alm_hp
+    return almmotho(alm_mo, lmax)
 
 
 def _alm_hp_to_packed(alm_hp: np.ndarray, lmax: int) -> np.ndarray:
@@ -77,17 +91,18 @@ def _alm_hp_to_packed(alm_hp: np.ndarray, lmax: int) -> np.ndarray:
     n_imag = (lmax - 2) * (lmax - 1) // 2
     real_p = np.zeros(n_real, dtype=np.float64)
     imag_p = np.zeros(n_imag, dtype=np.float64)
+    alm_mo = almhotmo(alm_hp, lmax)
     r_idx = 0
     i_idx = 0
     for L in range(2, lmax):
         for m in range(L + 1):
-            ho_idx = L * (L + 1) // 2 + m
+            mo_idx = L * (L + 1) // 2 + m
             if m <= 1:
-                real_p[r_idx] = alm_hp[ho_idx].real
+                real_p[r_idx] = alm_mo[mo_idx].real
                 r_idx += 1
             else:
-                real_p[r_idx] = alm_hp[ho_idx].real
-                imag_p[i_idx] = alm_hp[ho_idx].imag
+                real_p[r_idx] = alm_mo[mo_idx].real
+                imag_p[i_idx] = alm_mo[mo_idx].imag
                 r_idx += 1
                 i_idx += 1
     return np.concatenate([real_p, imag_p])

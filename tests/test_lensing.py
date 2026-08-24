@@ -114,6 +114,100 @@ def test_alm_format_round_trip():
     np.testing.assert_allclose(packed, packed2, atol=1e-14)
 
 
+def _packed_slots(L, m):
+    """Packed real/imag indices of coefficient (L, m), derived independently.
+
+    real slots run L=2.., m=0..L  -> offset L(L+1)/2 - 3 + m
+    imag slots run L=2.., m=2..L  -> offset (L-2)(L-1)/2 + (m - 2)
+    """
+    real = L * (L + 1) // 2 - 3 + m
+    imag = (L - 2) * (L - 1) // 2 + (m - 2) if m >= 2 else None
+    return real, imag
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy not installed")
+def test_alm_hp_to_packed_uses_true_healpy_ordering():
+    """A healpy-ordered mode must pack into the slot for the SAME (L, m).
+
+    healpy alm arrays are m-major (``hp.Alm.getidx``), while this package's
+    packed layout is L-major ("author ordering", ``L*(L+1)//2 + m``).
+    Converting between the two requires ``alm_utils.almhotmo``/``almmotho``.
+    Indexing a healpy-ordered array with the author-ordering formula instead
+    silently permutes every coefficient onto a *different* multipole. That
+    permutation is its own inverse-consistent partner, so
+    ``test_alm_format_round_trip`` above still passes; only a test that pins an
+    absolute (L, m) can catch it.
+    """
+    import healpy as hp
+
+    from diffcmb.lensing import _alm_hp_to_packed
+
+    lmax = 16
+    for L, m in [(2, 0), (2, 2), (5, 3), (9, 1), (15, 15)]:
+        alm_hp = np.zeros(lmax * (lmax + 1) // 2, dtype=np.complex128)
+        alm_hp[hp.Alm.getidx(lmax - 1, L, m)] = 3.0 + 5.0j
+        packed = _alm_hp_to_packed(alm_hp, lmax)
+
+        real_slot, imag_slot = _packed_slots(L, m)
+        assert packed[real_slot] == pytest.approx(3.0), (
+            f"Re a_({L},{m}) landed in the wrong packed slot -- "
+            "author/healpy alm ordering not converted"
+        )
+        # The packed layout has no slot for Im a_{L,1}, so m<=1 keeps only Re.
+        if m >= 2:
+            n_real = lmax * (lmax + 1) // 2 - 3
+            assert packed[n_real + imag_slot] == pytest.approx(5.0), (
+                f"Im a_({L},{m}) landed in the wrong packed slot"
+            )
+        # Nothing else may be populated.
+        assert np.count_nonzero(packed) == (2 if m >= 2 else 1)
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy not installed")
+def test_packed_sl_matches_healpy_power_per_multipole():
+    """S_L from the packed layout must equal sum_m |a_Lm|^2 at the same L.
+
+    This is the consequence that matters physically: if the ordering is not
+    converted, the C_L prior that Block 1 / Block 4 apply per multipole is
+    applied to coefficients that live at a different multipole on the sky.
+    Im a_{L,1} is zeroed on the reference side first, since the packed layout
+    has no slot for it, so both sides see identical data and the comparison is
+    exact rather than statistical.
+    """
+    import healpy as hp
+
+    from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np
+
+    lmax = 20
+    rng = np.random.default_rng(11)
+    n_alm = lmax * (lmax + 1) // 2
+    alm_hp = (
+        rng.normal(size=n_alm) + 1j * rng.normal(size=n_alm)
+    ).astype(np.complex128)
+    for L in range(2, lmax):
+        alm_hp[hp.Alm.getidx(lmax - 1, L, 0)] = alm_hp[
+            hp.Alm.getidx(lmax - 1, L, 0)
+        ].real
+        idx1 = hp.Alm.getidx(lmax - 1, L, 1)
+        alm_hp[idx1] = alm_hp[idx1].real
+
+    S_ref = np.zeros(lmax)
+    for L in range(2, lmax):
+        total = 0.0
+        for m in range(L + 1):
+            val = alm_hp[hp.Alm.getidx(lmax - 1, L, m)]
+            total += (1.0 if m == 0 else 2.0) * (val.real ** 2 + val.imag ** 2)
+        S_ref[L] = total
+
+    S = compute_sl_phi_np(_alm_hp_to_packed(alm_hp, lmax), lmax)
+
+    np.testing.assert_allclose(
+        S[2:lmax], S_ref[2:lmax], rtol=1e-12, atol=1e-14,
+        err_msg="packed S_L does not match the healpy power at the same "
+                "multipole -- author/healpy alm ordering not converted",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3 — precompute_lensing
 # ---------------------------------------------------------------------------
@@ -992,16 +1086,17 @@ def test_compute_sl_phi_np_matches_brute_force_healpy_ordering():
 
     S = compute_sl_phi_np(phi_packed, lmax)
 
-    # ho_idx formula matches _alm_packed_to_hp/_alm_hp_to_packed exactly
-    # (this codebase's "healpy ordering" helper functions use this triangular
-    # L*(L+1)//2 + m indexing directly, not hp.Alm.getidx).
+    # Index the unpacked array with hp.Alm.getidx -- the real healpy m-major
+    # ordering. This used to use the triangular L*(L+1)//2 + m formula, which
+    # matched _alm_packed_to_hp's own (incorrect) indexing and so agreed with
+    # it by construction rather than checking it.
+    import healpy as hp
     alm_hp = _alm_packed_to_hp(phi_packed, lmax)
     S_brute = np.zeros(lmax)
     for L in range(2, lmax):
         s = 0.0
         for m in range(L + 1):
-            ho_idx = L * (L + 1) // 2 + m
-            val = alm_hp[ho_idx]
+            val = alm_hp[hp.Alm.getidx(lmax - 1, L, m)]
             weight = 1.0 if m == 0 else 2.0
             s += weight * (val.real ** 2 + val.imag ** 2)
         S_brute[L] = s

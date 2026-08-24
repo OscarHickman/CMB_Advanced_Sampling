@@ -418,10 +418,13 @@ MUSE variants, and item (3) was missed until 2026-08-05 despite Flinch being nin
 
 ## Open items
 
-- [ ] **Cite Flinch (arXiv:2510.26691) and Almanac (arXiv:2305.16134) in related work, with the
+- [x] **Cite Flinch (arXiv:2510.26691) and Almanac (arXiv:2305.16134) in related work, with the
       distinction stated explicitly**: both are curved-sky (map, C_ℓ) samplers, neither has a φ or
-      C_L^φφ block. Leaving Flinch uncited is now the single most likely "why didn't they cite X"
-      referee complaint. **Highest priority item in this file.**
+      C_L^φφ block. **Done 2026-08-24** — `docs/paper/main.tex` carries both as `\bibitem`s and
+      states the lensing-blind distinction in three places: the related-work opening, the
+      "vs Commander / Almanac / Flinch" positioning entry, and the conclusion. Flinch is also
+      cited as the precedent for the differentiable-SHT machinery (framed as enabling machinery,
+      not a contribution — see the next item).
 - [ ] **Stop leading with the differentiable-SHT engineering.** Flinch makes curved-sky
       differentiability table stakes. Lead with the joint (C_ℓ, C_L^φφ) posterior.
 - [ ] **Evaluate MCLMC for the φ block — TRIGGERED 2026-08-07, spike implemented and mid-decision
