@@ -298,6 +298,13 @@ properly, and one subtlety in `achievements.md` has a literature home.
 
 ## Bearing on the open 51–86% φ-power deficit
 
+**⚠ 2026-08-24: `lensing.py` had an alm author/healpy ordering bug (fixed, commit `a16e9e6`,
+`ROADMAP.md`'s stop-block) that scrambled every φ coefficient onto the wrong multipole, including
+in every pilot run this section's autocorrelation numbers (e.g. "0.981" below) are drawn from.
+Treat the deficit-vs-mixing argument below as a hypothesis motivated by pre-fix evidence, not a
+conclusion — re-derive the lag-1/deficit numbers post-fix (job 11849969 in flight) before citing
+them.**
+
 **No paper found reports or explains a comparable deficit.** State that plainly. What the
 literature does supply is a ranked list of suspects, all cheap to test:
 
