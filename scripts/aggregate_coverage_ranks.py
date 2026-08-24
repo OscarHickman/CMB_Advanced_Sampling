@@ -134,14 +134,22 @@ def main():
 
         alm_s = d["alm_samples"]
         phi_s = d["phi_samples"]
-        clpp_s = np.exp(d["cl_phiphi_samples"])  # stored as log-spectrum
+        # Block 4 (C_L^phiphi|phi) is optional: chains run with
+        # sample_cl_phiphi=False omit this key entirely. Those chains still
+        # carry the SBC-supported field-level ranks (phi_power, alm_power),
+        # which are the headline calibration evidence -- only the
+        # interval-coverage cl_phiphi rows are unavailable.
+        has_clpp = "cl_phiphi_samples" in d.files
+        clpp_s = np.exp(d["cl_phiphi_samples"]) if has_clpp else None  # log-spectrum
         cl_s = np.exp(alm_s[:, :n_lncl])
         alm_part = alm_s[:, n_lncl:]
 
         n_tot = len(alm_s)
         start = int(args.burn_frac * n_tot)
         sl = slice(start, None, max(1, args.thin))
-        alm_part, phi_s, cl_s, clpp_s = alm_part[sl], phi_s[sl], cl_s[sl], clpp_s[sl]
+        alm_part, phi_s, cl_s = alm_part[sl], phi_s[sl], cl_s[sl]
+        if has_clpp:
+            clpp_s = clpp_s[sl]
         n_eff = len(alm_part)
 
         alm_true = d["alm_true_packed"]
@@ -169,8 +177,10 @@ def main():
             if len(ells) == 0:
                 continue
             idx = ells - 2
-            for tag, samp, tru_spec in (("cl_TT", cl_s, cl_realized),
-                                        ("cl_phiphi", clpp_s, clpp_realized)):
+            spectrum_rows = [("cl_TT", cl_s, cl_realized)]
+            if has_clpp:
+                spectrum_rows.append(("cl_phiphi", clpp_s, clpp_realized))
+            for tag, samp, tru_spec in spectrum_rows:
                 post = samp[:, idx].mean(axis=1)
                 tru = tru_spec[ells].mean()
                 records.setdefault((tag, lo, hi), []).append(
@@ -187,6 +197,12 @@ def main():
     }
     summary_rows = []
     for q in quantities:
+        if not any(k[0] == q for k in records):
+            # e.g. cl_phiphi when every chain ran with Block 4 off -- say so
+            # rather than printing an empty section that reads like a failure.
+            print(f"\n--- {labels[q]} ---")
+            print("  (not present in any input chain -- block disabled; skipped)")
+            continue
         print(f"\n--- {labels[q]} ---")
         print("  l-bin          N   mean_u   KS_p    ranks")
         pooled_u = []

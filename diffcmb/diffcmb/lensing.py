@@ -24,6 +24,8 @@ Gradient strategy
 Reference: Lewis & Challinor 2006 (Phys. Rep. 429, 1); Carron & Lewis 2017 (arXiv:1704.08230).
 """
 
+from typing import NamedTuple
+
 import numpy as np
 
 try:
@@ -174,6 +176,181 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> n
         val_cl = np.clip(val_cl, 1e-30, 1e10)
         lncl[i] = np.log(val_cl)
     return lncl
+
+
+# ---------------------------------------------------------------------------
+# Ancillary (non-centred) joint (phi, C_L^phiphi) rescaling move
+#
+# Blocks 3 and 4 together are a CENTRED parameterisation of an
+# amplitude-and-variance model: Block 3 moves phi at fixed C_L^phiphi, Block 4
+# draws C_L^phiphi | phi. That pair funnels, and the funnel is measured, not
+# hypothesised -- job 11836793 (2026-08-24) recorded worst lag-1
+# autocorrelation 0.945 with Block 4 on against 0.557 with it off at an
+# otherwise identical lmax=64 configuration.
+#
+# The move below is the ANCILLARY half of an ancillary-sufficient interweaving
+# strategy (Yu & Meng; the "ancillary vs sufficient reparameterisation" that is
+# Millea, Anderes & Wandelt 2020's central methodological result,
+# arXiv:2002.00965; the direct analogue of Racine et al. 2016's joint move for
+# the (a_lm, C_l) Gibbs funnel, arXiv:1512.06619). It holds the non-centred
+# variable xi = phi / sqrt(C) fixed and slides along the funnel axis:
+#
+#     phi -> alpha_L * phi ,    C_L -> alpha_L^2 * C_L
+#
+# Interweaving rather than replacing is deliberate: Block 4's exact
+# inverse-Gamma draw and Block 3's HMC are both already validated, and this
+# composes with them instead of invalidating either. Full non-centring would
+# destroy Block 4's conjugacy, since the likelihood would then depend on C.
+# ---------------------------------------------------------------------------
+
+class PhiRescaleMove(NamedTuple):
+    """Outcome of one ancillary rescaling move.
+
+    `phi`/`cl_phiphi` are the state to CARRY FORWARD (the proposal if accepted,
+    otherwise the unchanged current state). `phi_proposed`/`cl_phiphi_proposed`
+    are always the proposal, kept for diagnostics and tests. `log_alpha` is the
+    per-multipole log rescaling actually drawn (index 0 is L=2), which lets a
+    driver tune `proposal_scale` against the observed acceptance rate.
+    """
+
+    phi: np.ndarray
+    cl_phiphi: np.ndarray
+    accepted: bool
+    log_accept_ratio: float
+    log_alpha: np.ndarray
+    phi_proposed: np.ndarray
+    cl_phiphi_proposed: np.ndarray
+
+
+def _packed_coord_multipole(lmax: int) -> np.ndarray:
+    """Multipole L of every coordinate in the packed phi layout.
+
+    Traverses exactly as compute_sl_phi_np does: real parts for L=2..lmax-1,
+    m=0..L, then imaginary parts for m>=2.
+    """
+    L_arr = []
+    for L in range(2, lmax):
+        L_arr.extend([L] * (L + 1))
+    for L in range(2, lmax):
+        L_arr.extend([L] * max(L - 1, 0))
+    return np.array(L_arr, dtype=np.int64)
+
+
+def sample_phi_amplitude_rescale(
+    phi_packed: np.ndarray,
+    cl_phiphi_full: np.ndarray,
+    lmax: int,
+    neg_log_lik_fn,
+    rng=None,
+    proposal_scale: float = 0.1,
+) -> PhiRescaleMove:
+    """One Metropolis-Hastings ancillary rescaling move on (phi, C_L^phiphi).
+
+    Proposes ln alpha_L ~ N(0, proposal_scale^2) independently per multipole
+    and maps (phi, C) -> (alpha*phi, alpha^2*C). Because
+    S_L(alpha*phi) = alpha^2 * S_L(phi), the Gaussian prior exponent
+    S_L/(2 C_L) is exactly invariant, so the move slides along the funnel axis
+    that the centred Block 3 / Block 4 alternation mixes slowly across.
+
+    Acceptance ratio. The composite chain must target the same joint density
+    Block 4's exact conditional already implies. `sample_cl_phiphi_given_phi`
+    draws C_L | phi ~ InvGamma(L - 0.5, S_L/2), which corresponds to
+
+        log p(phi, C) = -psi(phi)
+                        - 0.5 * sum_L [ S_L(phi)/C_L + (2L+1) ln C_L ]
+
+    up to a constant -- i.e. a flat improper prior on C_L. The packed phi
+    vector holds n_L = (L+1) real + (L-1) imaginary = 2L coordinates at
+    multipole L, so the map's Jacobian is prod_L alpha_L^(2L) * alpha_L^2.
+    The invariant exponent cancels, leaving
+
+        log A = -[psi(phi') - psi(phi)] + sum_L ln alpha_L
+
+    (verified against a brute-force target evaluation in
+    tests/test_phi_ancillary_move.py rather than trusted from the derivation).
+
+    Note the (2L+1) normalisation is taken from what Block 4's alpha = L - 0.5
+    implies, NOT from the packed vector's 2L coordinates. The two blocks must
+    agree on the implied density or the composite chain targets neither; the
+    Jacobian separately uses the true sampled dimension 2L.
+
+    Parameters
+    ----------
+    phi_packed      : (n_real+n_imag,) current phi, packed real+imag layout.
+    cl_phiphi_full  : (lmax,) current phi power spectrum; entries below L=2 are
+                      ignored, matching log_prob_phi_block.
+    lmax            : maximum multipole.
+    neg_log_lik_fn  : callable phi_packed -> float, the NEGATIVE log likelihood
+                      (psi_lensed's sign convention). Must not include the phi
+                      Gaussian prior -- that term is handled analytically here
+                      and double-counting it would bias the move.
+    rng             : numpy Generator (default: fresh default_rng()).
+    proposal_scale  : sd of ln alpha_L. 0.0 makes the move an accepted no-op.
+
+    Returns
+    -------
+    PhiRescaleMove
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    phi_packed = np.asarray(phi_packed, dtype=np.float64)
+    cl_phiphi_full = np.asarray(cl_phiphi_full, dtype=np.float64)
+    if np.any(~np.isfinite(phi_packed)):
+        raise ValueError(
+            "Non-finite values (NaNs/Infs) detected in phi_packed during "
+            "sample_phi_amplitude_rescale!"
+        )
+    if proposal_scale < 0.0:
+        raise ValueError(f"proposal_scale must be >= 0, got {proposal_scale}")
+
+    n_L = lmax - 2
+
+    if proposal_scale == 0.0:
+        # The proposal is deterministically the identity, so MH accepts with
+        # probability 1 and no random draw is needed. Short-circuiting (rather
+        # than drawing and discarding) is what makes proposal_scale=0 leave the
+        # driver's RNG stream untouched, so a chain with the move enabled at
+        # scale 0 is bit-identical to the same chain with it disabled -- the
+        # regression test that proves the move perturbs state only through its
+        # own accept/reject.
+        log_alpha = np.zeros(n_L)
+        return PhiRescaleMove(
+            phi=phi_packed,
+            cl_phiphi=cl_phiphi_full,
+            accepted=True,
+            log_accept_ratio=0.0,
+            log_alpha=log_alpha,
+            phi_proposed=phi_packed,
+            cl_phiphi_proposed=cl_phiphi_full,
+        )
+
+    log_alpha = rng.normal(0.0, proposal_scale, size=n_L)
+    alpha = np.exp(log_alpha)
+
+    L_arr = _packed_coord_multipole(lmax)
+    phi_new = phi_packed * alpha[L_arr - 2]
+    cl_new = cl_phiphi_full.copy()
+    cl_new[2:lmax] = cl_phiphi_full[2:lmax] * alpha ** 2
+
+    delta_psi = float(neg_log_lik_fn(phi_new)) - float(neg_log_lik_fn(phi_packed))
+    log_accept_ratio = -delta_psi + float(np.sum(log_alpha))
+
+    # A non-finite ratio (an overflowing or NaN likelihood at the proposal)
+    # rejects rather than propagating garbage into the chain.
+    accepted = bool(
+        np.isfinite(log_accept_ratio)
+        and np.log(rng.uniform()) < log_accept_ratio
+    )
+
+    return PhiRescaleMove(
+        phi=phi_new if accepted else phi_packed,
+        cl_phiphi=cl_new if accepted else cl_phiphi_full,
+        accepted=accepted,
+        log_accept_ratio=log_accept_ratio,
+        log_alpha=log_alpha,
+        phi_proposed=phi_new,
+        cl_phiphi_proposed=cl_new,
+    )
 
 
 # ---------------------------------------------------------------------------

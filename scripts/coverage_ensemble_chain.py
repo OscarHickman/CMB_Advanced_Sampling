@@ -116,7 +116,18 @@ def main():
     p.add_argument("--outdir", type=str,
                    default="results/analysis/coverage_ensemble")
     p.add_argument("--checkpoint_every", type=int, default=50)
+    p.add_argument("--phi_mass_matrix", type=str, default="prior",
+                   choices=("prior", "fisher", "block"),
+                   help="Block 3 preconditioner. 'block' (per-m Nystrom cross-L "
+                        "correction) is the only setting that has ever cleared "
+                        "the equilibration gate -- job 11781626, lmax=64, "
+                        "Block 4 OFF (achievements.md).")
+    p.add_argument("--no_sample_cl_phiphi", action="store_true",
+                   help="Disable Block 4 (C_L^phiphi|phi). Required for the "
+                        "lmax=64 GO configuration: Block 4 ON degrades phi "
+                        "mixing to lag-1 0.945 vs 0.557 OFF (job 11836793).")
     args = p.parse_args()
+    sample_cl_phiphi = not args.no_sample_cl_phiphi
 
     lmax, nside, r = args.lmax, args.nside, args.realization
     os.makedirs(args.outdir, exist_ok=True)
@@ -172,7 +183,13 @@ def main():
     x0 = np.concatenate([np.log(cl_true[2:lmax]), alm_start_packed])
 
     t0 = time.time()
-    samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = run_gibbs_chain(
+    # run_gibbs_chain's return arity depends on which blocks are enabled: a
+    # 5-tuple with Block 3 only, a 6-tuple with Block 3 + Block 4. Unpack
+    # positionally rather than by fixed arity -- a hardcoded unpack here is
+    # exactly the bug that crashed a completed 3000-sweep chain (achievements.md,
+    # "Real bugs"), and SLURM still reported COMPLETED 0:0 because the traceback
+    # landed after the job's own work was done.
+    result = run_gibbs_chain(
         model,
         n_samples=args.n_samples,
         n_burnin=args.n_burnin,
@@ -183,31 +200,49 @@ def main():
         phi_initial=phi_start_packed,
         phi_hmc_step_size=args.phi_hmc_step_size,
         phi_n_lfs=args.phi_n_lfs,
-        phi_mass_matrix='prior',
-        sample_cl_phiphi=True,
+        phi_mass_matrix=args.phi_mass_matrix,
+        sample_cl_phiphi=sample_cl_phiphi,
         seed=r,
         checkpoint_path=ckpt,
         checkpoint_every=args.checkpoint_every,
     )
+    expected_arity = 6 if sample_cl_phiphi else 5
+    if len(result) != expected_arity:
+        raise RuntimeError(
+            f"realization {r}: run_gibbs_chain returned {len(result)} values, "
+            f"expected {expected_arity} for sample_cl_phiphi={sample_cl_phiphi}"
+        )
+    samples, phi_samples, logp, accepts, final_step = result[:5]
+    cl_phiphi_samples = result[5] if sample_cl_phiphi else None
     elapsed = time.time() - t0
     print(f"  done in {elapsed / 3600:.2f}h; alm accept={accepts.mean():.3f}")
 
-    if not (np.all(np.isfinite(samples)) and np.all(np.isfinite(phi_samples))
-            and np.all(np.isfinite(cl_phiphi_samples))):
+    finite_checks = [samples, phi_samples]
+    if cl_phiphi_samples is not None:
+        finite_checks.append(cl_phiphi_samples)
+    if not all(np.all(np.isfinite(a)) for a in finite_checks):
         raise RuntimeError(f"realization {r}: NaN/Inf in samples")
 
-    np.savez(
-        out,
-        realization=r, lmax=lmax, nside=nside,
-        alm_samples=samples, phi_samples=phi_samples,
-        cl_phiphi_samples=cl_phiphi_samples,
-        logp=logp, accepts=accepts,
-        cl_true=cl_true, cl_phiphi_true=cl_phiphi_true,
-        alm_true_packed=alm_true_packed, phi_true_packed=phi_true_packed,
-        start_cosine_similarity=start_corr,
-        n_burnin=args.n_burnin, phi_n_lfs=args.phi_n_lfs,
-        seconds_total=elapsed, seconds_per_sweep=elapsed / max(1, len(samples)),
-    )
+    save_kwargs = {
+        "realization": r, "lmax": lmax, "nside": nside,
+        "alm_samples": samples, "phi_samples": phi_samples,
+        "logp": logp, "accepts": accepts,
+        "cl_true": cl_true, "cl_phiphi_true": cl_phiphi_true,
+        "alm_true_packed": alm_true_packed,
+        "phi_true_packed": phi_true_packed,
+        "start_cosine_similarity": start_corr,
+        "n_burnin": args.n_burnin, "phi_n_lfs": args.phi_n_lfs,
+        "phi_mass_matrix": args.phi_mass_matrix,
+        "sample_cl_phiphi": sample_cl_phiphi,
+        "seconds_total": elapsed,
+        "seconds_per_sweep": elapsed / max(1, len(samples)),
+    }
+    # Omit the key entirely (rather than storing None) when Block 4 is off, so
+    # the aggregator's `"cl_phiphi_samples" in npz.files` check stays truthful
+    # and no allow_pickle-requiring object array reaches the output.
+    if cl_phiphi_samples is not None:
+        save_kwargs["cl_phiphi_samples"] = cl_phiphi_samples
+    np.savez(out, **save_kwargs)
     print(f"Saved realization {r} to {out}")
 
 

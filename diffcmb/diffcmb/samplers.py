@@ -917,6 +917,8 @@ def run_gibbs_chain(
     phi_fisher_n_probes=8,
     phi_block_n_probes=6,
     sample_cl_phiphi=False,
+    phi_rescale_move=False,
+    phi_rescale_proposal_scale=0.1,
     phi_sampler='hmc',
     phi_mclmc_L=1.0,
     phi_nuts_max_tree_depth=10,
@@ -1066,6 +1068,18 @@ def run_gibbs_chain(
         raise ValueError("sample_cl_phiphi=True (Block 4) requires cl_phiphi_full to be given")
     if phi_mass_matrix not in ('prior', 'fisher', 'block'):
         raise ValueError(f"phi_mass_matrix must be 'prior', 'fisher', or 'block', got {phi_mass_matrix!r}")
+    if phi_rescale_move and not sample_cl_phiphi:
+        raise ValueError(
+            "phi_rescale_move=True requires sample_cl_phiphi=True (Block 4). "
+            "The move rescales phi and C_L^phiphi jointly along the funnel "
+            "axis; with a fixed spectrum there is no funnel to slide along "
+            "and rescaling phi alone would target the wrong distribution."
+        )
+    if phi_rescale_move and phi_rescale_proposal_scale < 0.0:
+        raise ValueError(
+            f"phi_rescale_proposal_scale must be >= 0, got "
+            f"{phi_rescale_proposal_scale}"
+        )
     if sample_cl_phiphi and phi_mass_matrix == 'fisher':
         raise ValueError(
             f"sample_cl_phiphi=True is not supported together with "
@@ -1384,6 +1398,61 @@ def run_gibbs_chain(
     frozen_diag_fisher_per_L = np.zeros(lmax, dtype=np.float64)
     frozen_block_hessian = {}
 
+    phi_rescale_accepts = []
+
+    if sample_cl_phiphi:
+        def _sync_phi_state_to_spectrum(cl_new, phi_np):
+            """Push a new C_L^phiphi into the traced graph, rebuild the phi
+            mass matrix from it, and re-whiten the phi state to match.
+
+            Shared by Step 3a (Block 4's exact draw) and Step 3b (the ancillary
+            rescaling move) so the two cannot drift apart -- both change the
+            spectrum and both must leave the whitened state self-consistent
+            with it.
+
+            cl_phiphi_full_var is .assign()-ed rather than rebound because a
+            plain Python rebind is invisible to the already-traced phi kernel,
+            whereas a tf.Variable assignment is read live at call time.
+
+            For phi_mass_matrix='block' the per-m Cholesky is rebuilt from the
+            NEW spectrum but reuses the frozen diag_fisher_per_L/block_hessian
+            burn-in estimates: those are LIKELIHOOD-curvature quantities,
+            independent of cl_phiphi_full, so freezing them is correct however
+            often the spectrum is resampled. Only the 1/cl_phiphi(L)
+            prior-precision term tracks the new spectrum, and that costs a
+            Cholesky per block with no new gradient evaluations.
+            """
+            cl_phiphi_full_var.assign(tf.constant(cl_new, dtype=tf.float64))
+            if phi_whitener.mode == 'block':
+                phi_whitener.update_block(build_phi_block_mass_chol(
+                    lmax, cl_new, frozen_diag_fisher_per_L, frozen_block_hessian
+                ))
+            else:
+                phi_whitener.update_diag(
+                    build_phi_prior_mass_sqrt(lmax, cl_new)
+                )
+            phi_state_var.assign(
+                tf.constant(phi_whitener.whiten_np(phi_np), dtype=tf.float64)
+            )
+
+    if phi_rescale_move:
+        from .lensing import sample_phi_amplitude_rescale
+
+        def _phi_neg_log_lik_np(phi_np):
+            """psi_lensed at the CURRENT (alm, C_l) state, as a plain float.
+
+            Deliberately excludes the phi Gaussian prior: the rescaling move's
+            acceptance ratio handles that term analytically (it is exactly the
+            piece the move leaves invariant), so including it here would
+            double-count and bias the move.
+            """
+            full_params = tf.concat(
+                [lncl_var[2:], state_var / mass_sqrt_var], axis=0
+            )
+            return float(psi_lensed(
+                model, full_params, tf.constant(phi_np, dtype=tf.float64)
+            ).numpy())
+
     recent = []
     resume_tag = "resuming, " if resuming else ""
     if alm_sampler == 'cg':
@@ -1510,27 +1579,40 @@ def run_gibbs_chain(
             new_lncl_phiphi = sample_cl_phiphi_given_phi(phi_now_np, lmax, rng)
             cl_phiphi_full = cl_phiphi_full.copy()
             cl_phiphi_full[2:lmax] = np.exp(new_lncl_phiphi)
-            cl_phiphi_full_var.assign(tf.constant(cl_phiphi_full, dtype=tf.float64))
-            if phi_whitener.mode == 'block':
-                # Rebuild the per-m-block Cholesky from the NEW spectrum, but
-                # reuse the frozen diag_fisher_per_L/block_hessian curvature
-                # estimates from burn-in (or the zero/{} pre-warmup
-                # placeholder) rather than re-estimating them -- those are
-                # LIKELIHOOD-curvature quantities (estimate_phi_diag_fisher/
-                # estimate_phi_block_hessian, both independent of
-                # cl_phiphi_full), correct to freeze while only the
-                # 1/cl_phiphi(L) prior-precision term the new spectrum feeds
-                # gets updated every sweep. This costs only a per-m-block
-                # Cholesky (no new gradient evals), mirroring the 'prior'/
-                # 'fisher' diagonal case's cheap every-sweep rebuild below.
-                new_block_chol = build_phi_block_mass_chol(
-                    lmax, cl_phiphi_full, frozen_diag_fisher_per_L, frozen_block_hessian
+            _sync_phi_state_to_spectrum(cl_phiphi_full, phi_now_np)
+
+            # --- Step 3b: ancillary (non-centred) joint rescaling move ---
+            # Steps 3a and 3 together are a CENTRED parameterisation of an
+            # amplitude-and-variance model and they funnel: job 11836793
+            # measured worst lag-1 autocorrelation 0.945 with Block 4 on
+            # against 0.557 with it off, same lmax=64 configuration. This is
+            # the ancillary half of an ancillary-sufficient interweaving
+            # strategy -- it holds xi = phi/sqrt(C) fixed and slides (phi, C)
+            # along the funnel axis that 3a and 3 mix slowly across. Placed
+            # immediately after 3a so the sweep reads
+            # sufficient-update -> ancillary-update, the standard interweaving
+            # order (see lensing.py::sample_phi_amplitude_rescale).
+            if phi_rescale_move:
+                move = sample_phi_amplitude_rescale(
+                    phi_now_np,
+                    cl_phiphi_full,
+                    lmax,
+                    neg_log_lik_fn=_phi_neg_log_lik_np,
+                    rng=rng,
+                    proposal_scale=phi_rescale_proposal_scale,
                 )
-                phi_whitener.update_block(new_block_chol)
-            else:
-                new_phi_mass_sqrt = build_phi_prior_mass_sqrt(lmax, cl_phiphi_full)
-                phi_whitener.update_diag(new_phi_mass_sqrt)
-            phi_state_var.assign(tf.constant(phi_whitener.whiten_np(phi_now_np), dtype=tf.float64))
+                phi_rescale_accepts.append(move.accepted)
+                if move.accepted:
+                    cl_phiphi_full = move.cl_phiphi
+                    # Recorded spectrum must be the POST-move one; leaving the
+                    # pre-move Block 4 draw here would silently log a spectrum
+                    # the chain never actually held. Add 2*log_alpha rather
+                    # than recomputing log(cl_phiphi_full[2:lmax]): the move
+                    # scales C_L by exactly alpha^2, so this is exact, whereas
+                    # a log(exp(x)) round-trip perturbs the last bits.
+                    new_lncl_phiphi = new_lncl_phiphi + 2.0 * move.log_alpha
+                    phi_now_np = move.phi
+                    _sync_phi_state_to_spectrum(cl_phiphi_full, phi_now_np)
 
         # --- Step 3: phi | alm, C_l, d (opt-in, Phase 2 Block 3) ---
         if sample_phi:

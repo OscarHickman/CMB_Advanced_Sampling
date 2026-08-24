@@ -1029,3 +1029,140 @@ def test_gibbs_chain_sample_cl_phiphi_recovers_known_spectrum(small_model):
         f"recovered C_L (highest-L bin) = {recovered:.3e}, expected within "
         f"an order of magnitude of true C0={C0:.3e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Ancillary (non-centred) rescaling move wired into the Gibbs driver.
+# The move's own correctness (invariance, acceptance ratio, Jacobian) is
+# covered by tests/test_phi_ancillary_move.py; these cover the plumbing.
+# ---------------------------------------------------------------------------
+
+@skip_no_tfp
+def test_gibbs_chain_phi_rescale_move_requires_block4(small_model):
+    """The ancillary move rescales (phi, C_L^phiphi) jointly, so it is
+    meaningless without Block 4 sampling the spectrum -- must raise rather
+    than silently rescale a spectrum nobody is sampling."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    with pytest.raises(ValueError, match="phi_rescale_move"):
+        run_gibbs_chain(
+            small_model, n_samples=1, n_burnin=1, hmc_step_size=0.01, n_lfs=5,
+            cl_phiphi_full=cl_phiphi_full, phi_hmc_step_size=0.01, phi_n_lfs=5,
+            sample_cl_phiphi=False, phi_rescale_move=True, seed=42,
+        )
+
+
+@skip_no_tfp
+def test_gibbs_chain_phi_rescale_move_default_off_does_not_call_move(
+    small_model, monkeypatch
+):
+    """phi_rescale_move defaults to False -- the move must not run at all for
+    existing call sites (zero effect on validated configurations)."""
+    from diffcmb import run_gibbs_chain
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            "sample_phi_amplitude_rescale must not be called when "
+            "phi_rescale_move=False"
+        )
+
+    monkeypatch.setattr(
+        "diffcmb.lensing.sample_phi_amplitude_rescale", _boom, raising=False
+    )
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    run_gibbs_chain(
+        small_model, n_samples=2, n_burnin=1, hmc_step_size=0.01, n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full, phi_hmc_step_size=0.01, phi_n_lfs=5,
+        sample_cl_phiphi=True, seed=42,
+    )
+
+
+@skip_no_tfp
+def test_gibbs_chain_phi_rescale_move_runs_and_records_post_move_spectrum(
+    small_model,
+):
+    """With the move on, the chain completes, the recorded cl_phiphi_samples
+    are finite and move, and -- the subtle one -- the spectrum recorded for a
+    sweep is the POST-move spectrum, not the pre-move Block 4 draw."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    n_phi = n_real + n_imag
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    from diffcmb.samplers import _alm_index_lm
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    is_real = np.arange(n_phi) < n_real
+    var = np.empty(n_phi)
+    real_idx = np.where(is_real)[0]
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    imag_idx = np.where(~is_real)[0]
+    var[imag_idx] = C0 / 2.0
+    phi_initial = np.random.default_rng(3).normal(scale=np.sqrt(var))
+
+    out = run_gibbs_chain(
+        small_model,
+        n_samples=8,
+        n_burnin=5,
+        hmc_step_size=0.01,
+        n_lfs=5,
+        cl_phiphi_full=cl_phiphi_full,
+        phi_initial=phi_initial,
+        phi_hmc_step_size=0.01,
+        phi_n_lfs=5,
+        sample_cl_phiphi=True,
+        phi_rescale_move=True,
+        phi_rescale_proposal_scale=0.1,
+        seed=42,
+    )
+    assert len(out) == 6, "arity must be unchanged by the move"
+    samples, phi_samples, logp, accepts, final_step, cl_phiphi_samples = out
+    assert cl_phiphi_samples.shape == (8, lmax - 2)
+    assert np.all(np.isfinite(cl_phiphi_samples))
+    assert np.all(np.isfinite(phi_samples))
+    assert not np.allclose(cl_phiphi_samples[0], cl_phiphi_samples[-1])
+
+
+@skip_no_tfp
+def test_gibbs_chain_phi_rescale_move_zero_scale_matches_move_off(small_model):
+    """proposal_scale=0 makes the move an accepted identity, so the chain must
+    be bit-identical to the same chain with the move switched off. This is the
+    sharpest available check that the move is not perturbing state through
+    some path other than its own accept/reject."""
+    from diffcmb import run_gibbs_chain
+
+    lmax = small_model.lmax
+    cl_phiphi_full = np.full(lmax, 1e-6, dtype=np.float64)
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi_initial = np.random.default_rng(3).normal(
+        scale=1e-3, size=n_real + n_imag
+    )
+
+    common = {
+        "n_samples": 4, "n_burnin": 2, "hmc_step_size": 0.01, "n_lfs": 5,
+        "cl_phiphi_full": cl_phiphi_full, "phi_initial": phi_initial,
+        "phi_hmc_step_size": 0.01, "phi_n_lfs": 5,
+        "sample_cl_phiphi": True, "seed": 7,
+    }
+    # run_gibbs_chain's `seed` covers the numpy stream only; the HMC kernels
+    # draw from TF's global RNG, whose state carries across calls in one
+    # process. Without this the two chains differ even with identical
+    # arguments and the comparison below would be meaningless.
+    import tensorflow as tf
+    tf.random.set_seed(1234)
+    off = run_gibbs_chain(small_model, **common)
+    tf.random.set_seed(1234)
+    on = run_gibbs_chain(
+        small_model, phi_rescale_move=True,
+        phi_rescale_proposal_scale=0.0, **common
+    )
+    np.testing.assert_allclose(on[1], off[1], rtol=0, atol=0)
+    np.testing.assert_allclose(on[5], off[5], rtol=0, atol=0)
