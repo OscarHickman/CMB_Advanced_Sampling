@@ -19,7 +19,7 @@
 
 ### ⟹ NEXT SESSION — read this first
 
-**φ-block equilibration: lmax=128 scale-up is NO-GO (harvested 2026-08-22, job 11830353). Block 4 + `phi_mass_matrix='block'` unblocked 2026-08-23; the production-configuration gate (job 11836793, lmax=64 with Block 4 ON) is in flight — check it first.**
+**φ-block equilibration: the production configuration (lmax=64, Block 4 ON) is NO-GO, harvested 2026-08-24 (job 11836793).** Worst lag-1 autocorrelation 0.945 (gate <0.9), in bin `[30,60)` — up from 0.557 with Block 4 off (job 11781626, same lmax=64 setup). Turning Block 4 on materially degrades φ mixing even at the scale that previously passed. This confirms the risk flagged when the guard was relaxed: coupling low-L φ amplitudes to a resampled C_L^φφ hurts equilibration, though the worst bin is mid-L `[30,60)` here, not low-L as at lmax=128. Full detail: `achievements.md`. **Per the standing no-unilateral-tuning rule, do not launch another φ-equilibration pilot without asking first** — report this to the user and get direction (their preference order was: drop lmax further, lengthen the window, or raise `phi_n_lfs`).
 
 - Root cause + fix at lmax=64, both closed (`achievements.md`): the φ-block posterior has cross-L Hessian coupling no diagonal-in-L mass matrix can represent; `phi_mass_matrix='block'` (a per-m-block Nystrom correction) fixes it there. NUTS alone does not (job 11781382, NO-GO) — confirms it was never a trajectory-length problem.
 - **lmax=64 (job 11781626): GO, harvested 2026-08-18.** Worst lag-1 autocorrelation 0.557, worst drift 0.20σ.
