@@ -350,7 +350,7 @@ def main():
     if phi_true_packed is not None:
         phi_true_power = compute_true_phi_power_per_bin(phi_true_packed, L_arr, ell_bins)
     else:
-        phi_true_power = {key: np.nan for key in traces}
+        phi_true_power = dict.fromkeys(traces, np.nan)
 
     # --- Print full fine-lag table ---
     print("\n--- Fine-lag ACF table (rows=bins, cols=lags 1..30, 40, 50, 75, ...) ---")
