@@ -12,7 +12,6 @@ or inverting Lambda directly.
 """
 import numpy as np
 import pytest
-
 from diffcmb.messenger import run_messenger_gibbs
 
 

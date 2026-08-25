@@ -45,11 +45,11 @@ import time
 import healpy as hp
 import numpy as np
 import tensorflow as tf
-
-from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 from diffcmb.lensing import _alm_hp_to_packed, lens_map_tf
 from diffcmb.power import call_CAMB_map
 from diffcmb.samplers import find_map_estimate
+
+from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 
 # Identical to pilot_coverage_equilibration.py
 LCDM_PARAMS = [67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066]

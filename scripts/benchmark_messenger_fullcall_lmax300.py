@@ -20,7 +20,6 @@ import os
 import time
 
 import numpy as np
-
 from diffcmb.model import CosmologyAdvancedSampling
 from diffcmb.samplers import sample_alm_messenger
 

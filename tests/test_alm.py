@@ -1,5 +1,4 @@
 import numpy as np
-
 from diffcmb.alm import noisemapfunc
 
 

@@ -605,7 +605,6 @@ def test_phi_whitener_block_roundtrip_and_matches_diag_when_diagonal():
     unwhiten_tf must agree with the plain-diagonal elementwise division to
     numerical precision -- the block path is a strict generalisation."""
     import tensorflow as tf
-
     from diffcmb.samplers import PhiWhitener, build_phi_block_mass_chol
 
     lmax = 10
@@ -680,8 +679,9 @@ def test_gibbs_chain_sample_cl_phiphi_with_block_mass_matrix_moves(small_model):
     spectrum every sweep -- see run_gibbs_chain's docstring and the Step 3a
     block-mode branch. Both blocks and Block 4 should run to completion and
     actually move."""
-    from diffcmb import run_gibbs_chain
     from diffcmb.samplers import _alm_index_lm
+
+    from diffcmb import run_gibbs_chain
 
     lmax = small_model.lmax
     n_real = lmax * (lmax + 1) // 2 - 3
@@ -803,6 +803,7 @@ def test_gibbs_chain_phi_mass_matrix_prior_default_unchanged(small_model, monkey
     by comparing two runs' output arrays.
     """
     import diffcmb.samplers as samplers_mod
+
     from diffcmb import run_gibbs_chain
 
     def _boom(*args, **kwargs):
@@ -983,8 +984,9 @@ def test_gibbs_chain_sample_cl_phiphi_recovers_known_spectrum(small_model):
     in the right ballpark of that true value rather than drifting to a
     wildly different scale (which is what a weighting convention bug, e.g.
     the classic 1/C_l-vs-2/C_l mistake, would produce)."""
-    from diffcmb import run_gibbs_chain
     from diffcmb.samplers import _alm_index_lm
+
+    from diffcmb import run_gibbs_chain
 
     lmax = small_model.lmax
     n_real = lmax * (lmax + 1) // 2 - 3

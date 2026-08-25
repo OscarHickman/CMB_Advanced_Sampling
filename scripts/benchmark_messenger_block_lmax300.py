@@ -22,7 +22,6 @@ Usage: PYTHONPATH=diffcmb .venv/bin/python scripts/benchmark_messenger_block_lma
 import time
 
 import numpy as np
-
 from diffcmb.messenger import build_block_cholesky
 from diffcmb.model import CosmologyAdvancedSampling
 from diffcmb.samplers import _alm_index_lm, _build_inv_cl_diag, _packed_to_alm_ho

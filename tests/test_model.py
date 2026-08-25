@@ -134,7 +134,6 @@ def test_psi_tf_positive_definite_terms():
     Verify by comparing psi_tf to psi2-only contribution: psi_tf >= psi2.
     """
     import tensorflow as tf
-
     from diffcmb.model import CosmologyAdvancedSampling as CAS
     m = CAS(_lmax=10, _NSIDE=4, _noisesig=1.0, data_mode='synthetic')
     m._ensure_tf_tensors()
@@ -172,10 +171,10 @@ def test_psi_tf_beam_pixwin_matches_ground_truth_synthesis():
     """
     import healpy as hp
     import tensorflow as tf
-
-    from diffcmb import CosmologyAdvancedSampling
     from diffcmb.alm_utils import almmotho, splittosingularalm
     from diffcmb.power import beam_pixwin_transfer
+
+    from diffcmb import CosmologyAdvancedSampling
 
     lmax, nside, fwhm_arcmin = 16, 8, 30.0
     n_real = lmax * (lmax + 1) // 2 - 3

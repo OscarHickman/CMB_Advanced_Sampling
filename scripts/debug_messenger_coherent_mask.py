@@ -18,7 +18,6 @@ test whether contiguous masking -- not tau2 choice -- is what reproduces
 production's slow high-inv_cl_diag mixing.
 """
 import numpy as np
-
 from diffcmb.messenger import run_messenger_gibbs
 
 

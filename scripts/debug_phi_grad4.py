@@ -12,7 +12,6 @@ import numpy as np
 
 sys.path.insert(0, '/cosma/apps/durham/dc-hick2/diffcmb/diffcmb')
 import healpy as hp
-
 from diffcmb.lensing import (
     _alm_hp_to_packed,
     _alm_packed_to_hp,

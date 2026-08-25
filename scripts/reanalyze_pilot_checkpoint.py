@@ -13,6 +13,7 @@ Usage: PYTHONPATH=diffcmb .venv/bin/python scripts/reanalyze_pilot_checkpoint.py
 import argparse
 
 import numpy as np
+from diffcmb.samplers import _alm_index_lm
 from pilot_coverage_equilibration import (
     DRIFT_NOGO_SIGMA,
     LAG1_NOGO,
@@ -20,8 +21,6 @@ from pilot_coverage_equilibration import (
     phi_power_traces,
     report_equilibration,
 )
-
-from diffcmb.samplers import _alm_index_lm
 
 
 def main():

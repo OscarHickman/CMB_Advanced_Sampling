@@ -29,11 +29,11 @@ import argparse
 import healpy as hp
 import numpy as np
 import tensorflow as tf
-
-from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 from diffcmb.lensing import _alm_hp_to_packed, lens_map_tf
 from diffcmb.power import call_CAMB_map
 from diffcmb.samplers import _alm_index_lm
+
+from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 
 LCDM_PARAMS = [67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066]
 

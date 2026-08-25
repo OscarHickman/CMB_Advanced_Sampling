@@ -139,7 +139,6 @@ def test_alm_hp_to_packed_uses_true_healpy_ordering():
     absolute (L, m) can catch it.
     """
     import healpy as hp
-
     from diffcmb.lensing import _alm_hp_to_packed
 
     lmax = 16
@@ -175,7 +174,6 @@ def test_packed_sl_matches_healpy_power_per_multipole():
     exact rather than statistical.
     """
     import healpy as hp
-
     from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np
 
     lmax = 20

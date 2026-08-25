@@ -15,7 +15,6 @@ lmax=300/NSIDE=256, real Planck mask -- a handful of probed alm coefficients
 import healpy as hp
 import numpy as np
 import tensorflow as tf
-
 from diffcmb.sht_ducc import HealpixSHT, masked_synthesis_tf
 
 DATA_DIR = "/cosma8/data/dp004/dc-hick2/Plank"
