@@ -807,15 +807,21 @@ class PhiWhitener:
             self.mode = "block"
             self.n = n if n is not None else int(sum(len(idx) for idx, _ in block_chol))
             self.block_chol = block_chol
-            self.block_chol_tf = [
-                (tf.constant(idx, dtype=tf.int32), tf.Variable(tf.constant(R, dtype=tf.float64)))
-                for idx, R in block_chol
-            ]
+            if tf is not None:
+                self.block_chol_tf = [
+                    (tf.constant(idx, dtype=tf.int32), tf.Variable(tf.constant(R, dtype=tf.float64)))
+                    for idx, R in block_chol
+                ]
+            else:
+                self.block_chol_tf = None
         else:
             self.mode = "diag"
             self.n = len(mass_sqrt_np)
             self.mass_sqrt_np = np.asarray(mass_sqrt_np, dtype=np.float64)
-            self.mass_sqrt_var = tf.Variable(tf.constant(self.mass_sqrt_np, dtype=tf.float64))
+            if tf is not None:
+                self.mass_sqrt_var = tf.Variable(tf.constant(self.mass_sqrt_np, dtype=tf.float64))
+            else:
+                self.mass_sqrt_var = None
 
     def whiten_np(self, phi_np):
         if self.mode == "diag":
@@ -1057,10 +1063,6 @@ def run_gibbs_chain(
     """
     if alm_sampler not in ('hmc', 'cg', 'messenger'):
         raise ValueError(f"alm_sampler must be 'hmc', 'cg', or 'messenger', got {alm_sampler!r}")
-    if alm_sampler == 'hmc' and (tf is None or tfp is None):
-        raise ImportError("tensorflow and tensorflow_probability are required")
-    if alm_sampler in ('cg', 'messenger') and tf is None:
-        raise ImportError("tensorflow is required for the CG/messenger samplers")
     sample_phi = cl_phiphi_full is not None
     if sample_phi and alm_sampler not in ('hmc', 'cg'):
         raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc' or 'cg'")
@@ -1103,6 +1105,10 @@ def run_gibbs_chain(
             "guard above, now also applied to MCLMC "
             "(ROADMAP.md, 2026-08-14 geometry-fix spike)."
         )
+    if alm_sampler == 'hmc' and (tf is None or tfp is None):
+        raise ImportError("tensorflow and tensorflow_probability are required")
+    if alm_sampler in ('cg', 'messenger') and tf is None:
+        raise ImportError("tensorflow is required for the CG/messenger samplers")
     # alm_sampler='cg' + sample_phi is the Phase 2 gate-2 exactness experiment
     # (ROADMAP.md Section 1): Block 2 draws an exact Gaussian alm sample against
     # the *unlensed* operator (sample_alm_cg's target is model._psi_tf_raw,

@@ -32,9 +32,8 @@ try:
 except ImportError:
     HAS_TF = False
 
-DATA_DIR = '/cosma8/data/dp004/dc-hick2/Plank'
-LMAX = 30
-NSIDE = 256
+LMAX = 12
+NSIDE = 16
 NOISE = 1.0
 N_PARTS = 5
 
@@ -72,7 +71,7 @@ def _check_matvec_linear_symmetric_pd(model):
     n_real = lmax * (lmax + 1) // 2 - 3
     n_imag = (lmax - 2) * (lmax - 1) // 2
     n_alm = n_real + n_imag
-    lncl_np = np.log(model.prior_cls[2:LMAX] + 1e-30)
+    lncl_np = np.log(model.prior_cls[2:lmax] + 1e-30)
     lncl_tf_c = tf.constant(lncl_np, dtype=tf.float64)
 
     @tf.function(jit_compile=False)
@@ -121,8 +120,8 @@ def test_cg_matvec_linear_symmetric():
     gpus = tf.config.list_physical_devices('GPU')
 
     model = CosmologyAdvancedSampling(
-        _lmax=LMAX, _NSIDE=NSIDE, _noisesig=NOISE, data_mode='real',
-        data_dir=DATA_DIR, parameterization='centered', dtype=tf.complex128,
+        _lmax=LMAX, _NSIDE=NSIDE, _noisesig=NOISE, data_mode='synthetic',
+        parameterization='centered', dtype=tf.complex128,
     )
     model._ensure_tf_tensors()
 
@@ -149,8 +148,8 @@ def test_cg_matvec_linear_symmetric_matrixfree_sht():
     from diffcmb.model import CosmologyAdvancedSampling
 
     model = CosmologyAdvancedSampling(
-        _lmax=LMAX, _NSIDE=NSIDE, _noisesig=NOISE, data_mode='real',
-        data_dir=DATA_DIR, parameterization='centered', dtype=tf.complex128,
+        _lmax=LMAX, _NSIDE=NSIDE, _noisesig=NOISE, data_mode='synthetic',
+        parameterization='centered', dtype=tf.complex128,
         use_matrixfree_sht=True, sht_nthreads=2,
     )
     model._ensure_tf_tensors()

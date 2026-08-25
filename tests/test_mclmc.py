@@ -41,7 +41,9 @@ def _make_model(lmax=LMAX, nside=NSIDE):
     return model
 
 
-def _rand_unit_vector(n, rng, dtype=tf.float64):
+def _rand_unit_vector(n, rng, dtype=None):
+    if dtype is None:
+        dtype = tf.float64
     v = rng.standard_normal(n)
     v /= np.linalg.norm(v)
     return tf.constant(v, dtype=dtype)

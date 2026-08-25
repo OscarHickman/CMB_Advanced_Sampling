@@ -370,6 +370,7 @@ def test_gibbs_chain_cg_with_phi_block_moves(small_model):
     assert not np.allclose(phi_samples[0], phi_samples[-1])
 
 
+@skip_no_tfp
 def test_gibbs_chain_messenger_rejects_phi_block(small_model):
     """cl_phiphi_full (Block 3) is only wired up for alm_sampler in {'hmc', 'cg'}."""
     from diffcmb import run_gibbs_chain
@@ -671,6 +672,7 @@ def test_gibbs_chain_phi_mass_matrix_block_moves(small_model):
     assert not np.allclose(phi_samples[0], phi_samples[-1])
 
 
+@skip_no_tfp
 def test_gibbs_chain_sample_cl_phiphi_with_block_mass_matrix_moves(small_model):
     """sample_cl_phiphi=True combined with phi_mass_matrix='block' IS
     supported (2026-08-23, ROADMAP.md): unlike 'fisher', the block Nystrom

@@ -20,6 +20,7 @@ skip_no_deps = pytest.mark.skipif(not _has_deps(), reason="heavy deps unavailabl
 
 # ── construction ──────────────────────────────────────────────────────────────
 
+@skip_no_deps
 def test_model_constructs_or_skips():
     try:
         from diffcmb.model import CosmologyAdvancedSampling
