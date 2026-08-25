@@ -17,6 +17,7 @@ import numpy as np
 sys.path.insert(0, '/cosma/apps/durham/dc-hick2/diffcmb/diffcmb')
 
 import tensorflow as tf
+
 from diffcmb.lensing import _alm_hp_to_packed, psi_lensed
 from diffcmb.model import CosmologyAdvancedSampling
 

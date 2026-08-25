@@ -36,6 +36,7 @@ def _make_model_pair():
     underlying prior_map/Ninv/unmasked_idx — otherwise `data_mode='synthetic'`
     draws a fresh random sky per instance and the two models aren't comparable."""
     import tensorflow as tf
+
     from diffcmb.model import CosmologyAdvancedSampling
     from diffcmb.sht_ducc import HealpixSHT
 

@@ -20,6 +20,7 @@ toy-problem analog of high/low l), starting from a far-from-target warm
 state (mimicking the production checkpoint's already-drifted alm state).
 """
 import numpy as np
+
 from diffcmb.messenger import run_messenger_gibbs
 
 

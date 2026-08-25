@@ -39,6 +39,8 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "diffcmb")))
 
 import tensorflow as tf  # noqa: E402
+
+from diffcmb import CosmologyAdvancedSampling  # noqa: E402
 from diffcmb.messenger import (  # noqa: E402
     build_block_cholesky,
     sample_s_given_t_block,
@@ -52,8 +54,6 @@ from diffcmb.samplers import (  # noqa: E402
     _packed_to_alm_ho,
 )
 from diffcmb.sht_ducc import HealpixSHT  # noqa: E402
-
-from diffcmb import CosmologyAdvancedSampling  # noqa: E402
 
 
 def summarize(s, L_arr, probe_ells):

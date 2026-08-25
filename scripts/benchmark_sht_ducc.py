@@ -16,6 +16,7 @@ sys.path.insert(0, '/cosma/apps/durham/dc-hick2/diffcmb/diffcmb')
 
 import healpy as hp
 import tensorflow as tf
+
 from diffcmb.sht_ducc import HealpixSHT, masked_synthesis_tf
 
 DATA_DIR = '/cosma8/data/dp004/dc-hick2/Plank'

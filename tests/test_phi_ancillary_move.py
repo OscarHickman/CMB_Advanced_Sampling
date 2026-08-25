@@ -239,11 +239,12 @@ def test_rescale_move_preserves_stationary_distribution_of_exact_gibbs_chain():
       phi_i | C, d ~ N(mu_i, 1/prec_i),
           prec_i = 1/sigma^2 + w_i / C_{L_i},  mu_i = (d_i/sigma^2)/prec_i
     """
+    from scipy import stats
+
     from diffcmb.lensing import (
         sample_cl_phiphi_given_phi,
         sample_phi_amplitude_rescale,
     )
-    from scipy import stats
 
     lmax = 5
     n_real, n_imag = _packed_sizes(lmax)

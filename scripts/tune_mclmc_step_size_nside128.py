@@ -57,11 +57,10 @@ import tensorflow as tf
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np, lens_map_tf
 from diffcmb.power import call_CAMB_map
 from diffcmb.samplers import _alm_index_lm, find_map_estimate
-
-from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 
 LCDM_PARAMS = [67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066]
 

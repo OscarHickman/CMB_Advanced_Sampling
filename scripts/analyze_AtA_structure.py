@@ -8,6 +8,7 @@ Gauss-Legendre exact-quadrature switch (if not).
 Usage: PYTHONPATH=diffcmb .venv/bin/python scripts/analyze_AtA_structure.py
 """
 import numpy as np
+
 from diffcmb.samplers import _packed_to_alm_ho
 from diffcmb.sht_ducc import HealpixSHT
 

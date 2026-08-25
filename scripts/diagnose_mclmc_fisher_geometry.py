@@ -37,9 +37,6 @@ import time
 import healpy as hp
 import numpy as np
 import tensorflow as tf
-from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np, lens_map_tf
-from diffcmb.power import call_CAMB_map
-from diffcmb.samplers import _alm_index_lm, find_map_estimate
 from pilot_coverage_equilibration import (
     DRIFT_NOGO_SIGMA,
     LAG1_NOGO,
@@ -51,6 +48,9 @@ from pilot_coverage_equilibration import (
 )
 
 from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
+from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np, lens_map_tf
+from diffcmb.power import call_CAMB_map
+from diffcmb.samplers import _alm_index_lm, find_map_estimate
 
 
 def main():

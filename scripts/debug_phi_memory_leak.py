@@ -28,9 +28,9 @@ import time
 
 import numpy as np
 import tensorflow as tf
-from diffcmb.lensing import psi_lensed
 
 from diffcmb import CosmologyAdvancedSampling
+from diffcmb.lensing import psi_lensed
 
 
 def rss_mb():

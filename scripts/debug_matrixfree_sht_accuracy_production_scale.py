@@ -18,6 +18,7 @@ the raw SHT operator, so it is cheap and decisive.
 """
 import healpy as hp
 import numpy as np
+
 from diffcmb.sht_ducc import HealpixSHT
 
 DATA_DIR = "/cosma8/data/dp004/dc-hick2/Plank"

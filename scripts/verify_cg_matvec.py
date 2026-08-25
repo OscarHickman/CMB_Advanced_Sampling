@@ -20,6 +20,7 @@ import numpy as np
 sys.path.insert(0, '/cosma/apps/durham/dc-hick2/diffcmb/diffcmb')
 
 import tensorflow as tf
+
 from diffcmb.model import CosmologyAdvancedSampling
 
 DATA_DIR = '/cosma8/data/dp004/dc-hick2/Plank'

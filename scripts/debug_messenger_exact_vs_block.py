@@ -29,6 +29,7 @@ import tensorflow as tf
 
 sys.path.insert(0, "diffcmb")
 
+from diffcmb import CosmologyAdvancedSampling
 from diffcmb.messenger import (
     build_block_cholesky,
     run_messenger_gibbs,
@@ -42,8 +43,6 @@ from diffcmb.samplers import (
     _packed_to_alm_ho,
 )
 from diffcmb.sht_ducc import HealpixSHT
-
-from diffcmb import CosmologyAdvancedSampling
 
 LMAX = 60
 NSIDE = 64

@@ -88,6 +88,7 @@ def test_splittosingularalm_m01_imaginary_zero():
 def test_splittosingularalm_tf_matches_numpy():
     """TF scatter_nd implementation must match the numpy reference exactly."""
     import tensorflow as tf
+
     from diffcmb.alm_utils import splittosingularalm, splittosingularalm_tf
 
     rng = np.random.default_rng(3)
@@ -132,6 +133,7 @@ def test_almtomap_tf_matches_healpy():
     import healpy as hp
     import scipy
     import tensorflow as tf
+
     from diffcmb.alm_utils import (
         almtomap_tf,
         hpalminit,
