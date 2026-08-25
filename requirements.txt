@@ -1,10 +1,10 @@
 # Minimal inferred dependencies for running the analysis scripts
 polars>=0.20
-numpy>=1.19
+numpy>=1.19,<2.0
 matplotlib>=3.3
 scipy>=1.5
 tensorflow>=2.6
-tensorflow-probability[tf]>=0.14
+tensorflow-probability>=0.14
 astropy>=4.2
 emcee>=3.0
 pyyaml>=5.4
