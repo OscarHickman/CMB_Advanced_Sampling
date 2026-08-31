@@ -301,3 +301,47 @@ def hpalminit(_alms, _lmax):
         _alms[_count] = complex(np.real(_alms[_count]), 0)
         _count = _count + 1
     return _alms
+
+
+def packed_dof_per_multipole(lmax):
+    """Number of REAL degrees of freedom the packed alm/phi vector carries at
+    each multipole L (index 0..lmax-1; entries for L<2 are zero).
+
+    This is not 2L+1. `splittosingularalm` stores an imaginary part only for
+    m >= 2 -- `if m == 0 or m == 1` writes `complex(real, 0)` -- so
+    Im(a_{L,1}) is forced to zero at every multipole and each L carries
+    1 (m=0) + 1 (m=1) + 2*(L-1) (m=2..L) = 2L real dof.
+
+    Blocks 1 and 4 need this because their inverse-Gamma conditionals are
+    derived from the Gaussian prior's normalisation, C^{-k/2}, where k is
+    exactly this count. Assuming k = 2L+1 (as the code did until 2026-08-31)
+    puts the shape parameter half a unit off and biases E[C_L] by
+    (L-1.5)/(L-2) -- 0.8% at L=63 but 50% at L=3 and undefined at L=2.
+
+    Deriving the exponent from this function rather than hardcoding a formula
+    means the conditionals stay correct if the packing is ever changed to
+    restore the missing Im(a_{L,1}) dof (which would make k = 2L+1 and is
+    tracked in ROADMAP.md as a separate, larger fix).
+    """
+    dof = np.zeros(lmax, dtype=np.int64)
+    for L in range(2, lmax):
+        for m in range(L + 1):
+            dof[L] += 1 if (m == 0 or m == 1) else 2
+    return dof
+
+
+def invgamma_shape_for_spectrum(lmax, a0=-1.0):
+    """Shape parameter alpha of the exact C_L conditional, per multipole.
+
+    With S_L | C_L ~ C_L * chi^2_k (k = packed_dof_per_multipole) the
+    likelihood in C_L is C^{-k/2} exp(-S_L/2C); against a prior
+    InvGamma(a0, b0) the posterior is
+
+        C_L | . ~ InvGamma(k/2 + a0,  b0 + S_L/2).
+
+    The default a0 = -1 is the FLAT (improper) prior p(C) ∝ const, giving
+    alpha = k/2 - 1 (= L - 1 for the current k = 2L packing). Note a0 = 0
+    would be Jeffreys, not flat -- a distinction that is easy to get wrong
+    and was part of how the original error survived.
+    """
+    return packed_dof_per_multipole(lmax) / 2.0 + a0

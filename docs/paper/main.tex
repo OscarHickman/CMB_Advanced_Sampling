@@ -191,7 +191,7 @@ lensed log-probability target and its autodiff gradient unchanged.
 Given the current $\phi$ amplitudes, the conditional $p(\clpp \mid \phi)$ is
 exactly inverse-Gamma by the same conjugacy argument as Block 1,
 \begin{equation}
-  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(L - \tfrac12,\; S_L/2\right),
+  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(k_L/2 - 1,\; S_L/2\right),
   \qquad S_L = \sum_{m=-L}^{L} |\phi_{Lm}|^2 ,
   \label{eq:block4}
 \end{equation}
@@ -202,8 +202,23 @@ Block 3 mass matrix to match, closing the joint posterior.
 not a free choice}
 \label{sec:clpp-prior}
 
-Equation~\eqref{eq:block4} is the conditional implied by a \emph{flat} prior on
-$\clpp$, which is improper. This is worth stating explicitly rather than
+Equation~\eqref{eq:block4} deserves care in two respects: the number of degrees
+of freedom it encodes, and the prior it implies.
+
+Our packed parameterisation stores an imaginary part only for $m \ge 2$, so
+each multipole carries $k_L = 2L$ real degrees of freedom rather than $2L+1$.
+The Gaussian prior normalisation is then $C^{-k_L/2}$, and against a prior
+$\mathrm{InvGamma}(a_0, b_0)$ the exact conditional is
+$\mathrm{InvGamma}(k_L/2 + a_0,\; b_0 + S_L/2)$ --- i.e.\ shape $L-1$ under the
+flat prior, not $L-\tfrac12$. We note this explicitly because the error is
+invisible to the obvious check: a probability-integral-transform test of the
+draws against the sampler's own stated conditional passes for \emph{any} shape
+parameter, since code and reference share the assumption. Only an independent
+generative calibration test --- which requires a proper prior, below --- can
+detect it.
+
+Equation~\eqref{eq:block4} is otherwise the conditional implied by a
+\emph{flat} prior on $\clpp$, which is improper. This is worth stating explicitly rather than
 leaving implicit, because it propagates into the $\phi$ block in a way that is
 easy to miss. Integrating $\clpp$ out of the joint gives a marginal on the
 field, $p(\phi) \propto S_L^{-(L-1/2)}$; against the radial measure for the
@@ -231,17 +246,18 @@ We therefore also provide the conjugate proper alternative, a weakly
 informative $\mathrm{InvGamma}(\nu/2,\, \nu C_L^{\phi\phi,\,\rm fid}/2)$ prior centred on
 a fiducial spectrum, under which
 \begin{equation}
-  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(L - \tfrac12 + \tfrac{\nu}{2},\;
+  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(k_L/2 + \tfrac{\nu}{2},\;
   \big(S_L + \nu\,C_L^{\phi\phi,\,\rm fid}\big)/2\right).
   \label{eq:block4-proper}
 \end{equation}
 Here $\nu$ reads as an effective number of prior pseudo-modes, on the same
-footing as the $2L+1$ real modes the data supplies at multipole $L$, so the
+footing as the $k_L$ real modes the data supplies at multipole $L$, so the
 prior regularises the lowest multipoles --- where the improper prior does its
 damage --- and is negligible at high $L$. The marginal tail becomes
-$p(r) \propto r^{\,1-\nu}$, so the target is proper only for $\nu > 2$; we use
-$\nu = \placeholder{6}$, and reject $\nu \le 2$ at the API level rather than
-allowing a choice that appears to fix the problem while leaving it in place.
+$p(r) \propto r^{\,-1-\nu}$, so the target is proper exactly for $\nu > 0$; we
+use $\nu = \placeholder{6}$, and reject $\nu \le 0$ at the API level rather
+than allowing a choice that appears to fix the problem while leaving it in
+place.
 
 % --- Forward model ---
 \subsection{Differentiable lensing operator}
@@ -329,19 +345,32 @@ rather than merely failing to reject.
 
 \subsubsection*{Field-level calibration}
 
-The field ranks are the statistic this design supports directly. The $\alm$
-ranks are consistent with uniformity. The $\phi$ ranks are not
-(\placeholder{$\bar u = 0.367$}), and we attribute this to the improper prior
-of Sec.~\ref{sec:clpp-prior} rather than to the sampler: with the flat prior
-the target's $\phi$ marginal is flat in $S_L$, while $\phi^{\rm true}$ was drawn
-from a proper Gaussian, so the two distributions differ by construction and the
-rank has no reason to be uniform. We resolve this in two ways, and report both:
-by fixing $\clpp$ at the fiducial spectrum, under which the $\phi$ prior is
-proper and identical to the generative process; and by adopting the proper
-conjugate prior of Eq.~\eqref{eq:block4-proper} and drawing the truth from that
-same joint prior, which restores a strict SBC test while retaining the $\clpp$
-block that produces the joint posterior of Sec.~\ref{sec:joint-posterior}.
-\todo{Insert final rank figures and $p$-values from both runs.}
+The field ranks are the statistic this ensemble design supports directly, and
+they are reported for the configuration in which they are interpretable: with
+$\clpp$ held at the fiducial spectrum, so that the $\phi$ prior is proper and
+\emph{identical to the process that generated the truth}. Pooling 12
+independent chains at $\lmax = \placeholder{64}$ over four multipole bins, the
+mean normalised ranks are
+\begin{equation*}
+  \bar u_{\phi} = \placeholder{0.453}\ (p = \placeholder{0.17}), \qquad
+  \bar u_{\alm} = \placeholder{0.537}\ (p = \placeholder{0.33}),
+\end{equation*}
+both consistent with uniformity, against $\bar u_\phi = \placeholder{0.367}$
+($p = \placeholder{0.004}$) for the same configuration with $\clpp$ resampled
+under the flat improper prior. \todo{Add rank histograms.}
+
+That the $\phi$ rank is uniform only once $\clpp$ is held fixed is itself
+informative, and is the reason we treat the prior of Sec.~\ref{sec:clpp-prior}
+as a modelling decision rather than a detail. Under the flat prior the target's
+$\phi$ marginal is flat in $S_L$ while $\phi^{\rm true}$ is drawn from a proper
+Gaussian, so the two distributions differ by construction and the rank has no
+reason to be uniform: the departure is a statement about the prior, not
+evidence of a sampler defect. Adopting the proper conjugate prior of
+Eq.~\eqref{eq:block4-proper} and drawing the truth from that same joint prior
+restores a strict calibration test while retaining the $\clpp$ block that
+produces the joint posterior of Sec.~\ref{sec:joint-posterior}; this is the
+configuration we recommend for quoting $\clpp$ constraints.
+\todo{Report the proper-prior ensemble once re-run against the corrected shape parameter.}
 
 \subsection{Joint $(\cl^{TT}, \clpp)$ posterior}
 \label{sec:joint-posterior}

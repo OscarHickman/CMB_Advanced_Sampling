@@ -13,6 +13,7 @@ from .alm_utils import (
     hpcltoalm,
     hpmapsmooth,
     hpmaptoalm,
+    invgamma_shape_for_spectrum,
     splittosingularalm_tf,
 )
 
@@ -565,10 +566,17 @@ class CosmologyAdvancedSampling:
         if np.any(~np.isfinite(alm_flat_np)):
             raise ValueError("Non-finite values (NaNs/Infs) detected in alm_flat_np during sample_cl_given_alm!")
         S = self.compute_sl_np(alm_flat_np)
+        # alpha = k_l/2 - 1 with k_l the packed vector's REAL dof at l, which
+        # is 2l (not 2l+1): splittosingularalm forces Im(a_{l,1}) = 0. Using
+        # l-0.5 here assumed 2l+1 and biased E[C_l] by (l-1.5)/(l-2) -- 0.8%
+        # at l=63 but 50% at l=3 and undefined at l=2. Derived from the
+        # packing rather than hardcoded so it stays correct if that missing
+        # dof is ever restored. See achievements.md, 2026-08-31.
+        alpha_l = invgamma_shape_for_spectrum(lmax)
         lncl = np.empty(lmax - 2)
         for i in range(lmax - 2):
             l = i + 2
-            alpha = float(l) - 0.5
+            alpha = float(alpha_l[l])
             s_val = S[l]
             if not np.isfinite(s_val) or s_val < 0.0:
                 s_val = 0.0

@@ -34,10 +34,11 @@ except ImportError:
     hp = None
 
 try:
-    from .alm_utils import almhotmo, almmotho
+    from .alm_utils import almhotmo, almmotho, invgamma_shape_for_spectrum
 except ImportError:  # pragma: no cover - alm_utils needs healpy/scipy
     almhotmo = None
     almmotho = None
+    invgamma_shape_for_spectrum = None
 
 try:
     import tensorflow as tf
@@ -154,7 +155,11 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None,
     """Sample ln(C_L^phiphi) | phi for L=2..lmax-1 from the exact inverse-Gamma
     conditional implied by log_prob_phi_block's Gaussian prior term:
 
-        C_L^phiphi | phi ~ InvGamma(alpha=L-0.5, beta=S_L/2)
+        C_L^phiphi | phi ~ InvGamma(alpha=k_L/2 - 1, beta=S_L/2)
+
+    where k_L = 2L is the number of REAL packed dof at multipole L (the
+    packing forces Im(a_{L,1}) = 0, so it is 2L and not 2L+1; this was wrong
+    until 2026-08-31 -- see alm_utils.packed_dof_per_multipole)
 
     where S_L = sum_{m=-L}^{L} |phi_{L,m}|^2 (compute_sl_phi_np). Same
     structure as model.py::sample_cl_given_alm (Block 1), applied to phi.
@@ -180,18 +185,21 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None,
     Passing `prior_nu=nu` with a fiducial spectrum places a conjugate
     InvGamma(alpha_0 = nu/2, beta_0 = nu*C_L^fid/2) prior on each C_L, so
 
-        C_L^phiphi | phi ~ InvGamma(L - 0.5 + nu/2, (S_L + nu*C_L^fid)/2).
+        C_L^phiphi | phi ~ InvGamma(k_L/2 + nu/2, (S_L + nu*C_L^fid)/2)
+                         = InvGamma(L + nu/2, (S_L + nu*C_L^fid)/2).
 
     `nu` reads as an effective number of prior "pseudo-modes", on the same
-    footing as the 2L+1 real modes the data supplies at multipole L -- so
+    footing as the k_L = 2L real modes the data supplies at multipole L -- so
     nu is weak where the data is informative (high L) and does most of its
     work at low L, which is exactly where the improper prior hurts.
 
-    REQUIREMENT nu > 2, enforced. With the prior in place the marginal tail
-    becomes p(r) ∝ r^{1-nu}, which is normalisable only for nu > 2; at nu = 2
-    it decays as 1/r and still diverges logarithmically. A nu <= 2 would leave
-    the target improper while *appearing* to fix it, so it is rejected rather
-    than accepted with a warning.
+    REQUIREMENT nu > 0, enforced. With the prior in place the marginal tail
+    becomes p(r) ∝ r^{-1-nu} (the k_L cancels), normalisable exactly for
+    nu > 0; at nu = 0 it decays as 1/r and still diverges logarithmically. A
+    nu <= 0 would leave the target improper while *appearing* to fix it, so it
+    is rejected rather than accepted with a warning. (This threshold was nu > 2
+    while the code assumed 2L+1 dof -- it has to be re-derived alongside the
+    exponent, not carried over.)
 
     Note on clipping: model.py::sample_cl_given_alm clips the sampled C_l to
     [3e-7, 3e6], a range tuned to typical CMB C_l units. C_L^phiphi lives on
@@ -215,11 +223,12 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None,
     use_proper_prior = prior_nu is not None
     if use_proper_prior:
         prior_nu = float(prior_nu)
-        if not np.isfinite(prior_nu) or prior_nu <= 2.0:
+        if not np.isfinite(prior_nu) or prior_nu <= 0.0:
             raise ValueError(
-                f"prior_nu must be > 2 for a proper phi marginal (got {prior_nu}); "
-                "the marginal tail goes as r^(1-nu), which is normalisable only "
-                "above 2. See this function's docstring."
+                f"prior_nu must be > 0 for a proper phi marginal (got {prior_nu}); "
+                "with k_L = 2L packed dof the marginal tail goes as "
+                "r^(-1-nu), normalisable exactly for nu > 0. See this "
+                "function's docstring."
             )
         if cl_phiphi_fid is None:
             raise ValueError(
@@ -236,16 +245,21 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None,
             raise ValueError("cl_phiphi_fid must be finite and non-negative for L=2..lmax-1")
 
     S = compute_sl_phi_np(phi_packed, lmax)
+    # alpha = k_L/2 + a0 with k_L the packed vector's REAL dof at L, which is
+    # 2L (not 2L+1) because splittosingularalm forces Im(a_{L,1}) = 0. a0 is
+    # the prior's InvGamma shape: -1 for the flat improper default, nu/2 for
+    # the proper conjugate prior. Derived from the packing, not hardcoded.
+    a0 = (prior_nu * 0.5) if use_proper_prior else -1.0
+    alpha_L = invgamma_shape_for_spectrum(lmax, a0=a0)
     lncl = np.empty(lmax - 2)
     for i in range(lmax - 2):
         L = i + 2
-        alpha = float(L) - 0.5
+        alpha = float(alpha_L[L])
         s_val = S[L]
         if not np.isfinite(s_val) or s_val < 0.0:
             s_val = 0.0
         if use_proper_prior:
-            # Conjugate update: alpha_0 = nu/2, beta_0 = nu*C_L^fid/2.
-            alpha += prior_nu * 0.5
+            # beta_0 = nu*C_L^fid/2, so beta = (S_L + nu*C_L^fid)/2 below.
             s_val = s_val + prior_nu * float(cl_phiphi_fid[L])
         beta = max(s_val * 0.5, 1e-60)
         g = rng.gamma(alpha, scale=1.0)

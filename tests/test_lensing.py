@@ -1302,10 +1302,12 @@ def test_cl_phiphi_proper_prior_matches_conjugate_invgamma():
 
     Prior C_L ~ InvGamma(alpha_0, beta_0) with alpha_0 = nu/2,
     beta_0 = nu*C_L^fid/2 (nu = "effective number of prior pseudo-modes",
-    matching how the data contributes 2L+1 real modes). Multiplying by the
-    Gaussian phi prior C^{-(2L+1)/2} exp(-S_L/2C) gives
+    matching how the data contributes k_L = 2L real modes -- 2L, not 2L+1,
+    because the packing forces Im(a_{L,1}) = 0). Multiplying by the Gaussian
+    phi prior C^{-k_L/2} exp(-S_L/2C) gives
 
-        C_L | phi ~ InvGamma(L - 0.5 + nu/2, (S_L + nu*C_L^fid)/2).
+        C_L | phi ~ InvGamma(k_L/2 + nu/2, (S_L + nu*C_L^fid)/2)
+                  = InvGamma(L + nu/2, (S_L + nu*C_L^fid)/2).
 
     Checked by KS against that law rather than by re-deriving it in the test.
     """
@@ -1330,7 +1332,7 @@ def test_cl_phiphi_proper_prior_matches_conjugate_invgamma():
     S = compute_sl_phi_np(phi, lmax)
     for i in range(lmax - 2):
         L = i + 2
-        alpha = L - 0.5 + nu / 2.0
+        alpha = L + nu / 2.0
         beta = (S[L] + nu * cl_fid[L]) / 2.0
         p = stats.kstest(draws[:, i], "invgamma", args=(alpha, 0.0, beta)).pvalue
         assert p > 1e-3, f"L={L}: draws do not match conjugate posterior (KS p={p:.2g})"
@@ -1370,16 +1372,21 @@ def test_cl_phiphi_proper_prior_shrinks_an_inflated_amplitude_toward_fiducial():
 
 
 @pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
-def test_cl_phiphi_prior_nu_must_exceed_2_for_a_proper_phi_marginal():
-    """nu > 2 is a correctness requirement, not a taste parameter.
+def test_cl_phiphi_prior_nu_must_be_positive_for_a_proper_phi_marginal():
+    """nu > 0 is a correctness requirement, not a taste parameter.
 
     Integrating C_L out of the joint leaves a phi marginal
-        p(r) ∝ r^{2L} (r^2/2 + beta_0)^{-(L - 0.5 + nu/2)}   [r^2 = S_L]
-    whose large-r tail is r^{1-nu}. That is normalisable only for nu > 2;
-    at nu = 2 it decays as 1/r and still diverges logarithmically, which is
-    exactly the improper-prior pathology this feature exists to remove.
-    A nu that silently produced an improper target would be worse than no
-    feature at all, so the API must reject it.
+        p(r) ∝ r^{k_L - 1} (r^2/2 + beta_0)^{-(k_L/2 + nu/2)}   [r^2 = S_L]
+    whose large-r tail is r^{-1-nu} (the k_L cancels). That is normalisable
+    exactly for nu > 0; at nu = 0 it decays as 1/r and still diverges
+    logarithmically, which is the improper-prior pathology this feature
+    exists to remove -- and is what the flat default (a0 = -1, tail r^{+1})
+    does far more violently. A nu that silently produced an improper target
+    would be worse than no feature at all, so the API must reject it.
+
+    Note the threshold was nu > 2 when the code assumed 2L+1 packed dof;
+    correcting k_L to 2L moved it to nu > 0. The guard has to be derived
+    alongside the exponent, not carried over.
     """
     from diffcmb.lensing import sample_cl_phiphi_given_phi
 
@@ -1389,7 +1396,7 @@ def test_cl_phiphi_prior_nu_must_exceed_2_for_a_proper_phi_marginal():
     phi = np.random.default_rng(1).normal(scale=1e-3, size=n_real + n_imag)
     cl_fid = np.full(lmax, 1e-6)
 
-    for bad_nu in (0.5, 2.0):
+    for bad_nu in (-1.0, 0.0):
         with pytest.raises(ValueError, match="nu"):
             sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(0),
                                        prior_nu=bad_nu, cl_phiphi_fid=cl_fid)
@@ -1397,18 +1404,22 @@ def test_cl_phiphi_prior_nu_must_exceed_2_for_a_proper_phi_marginal():
     # And the tail exponent itself: verify numerically that the marginal
     # falls off as r^{1-nu}, so the nu>2 threshold is the real boundary.
     from scipy.special import gammaln
-    for nu in (4.0, 8.0):
-        L, alpha_0, beta_0 = 5, nu / 2.0, nu * 1e-6 / 2.0
-        alpha = L - 0.5 + alpha_0
 
-        def log_p_r(r, alpha=alpha, beta_0=beta_0, L=L):
-            return (2 * L) * np.log(r) - alpha * np.log(r ** 2 / 2.0 + beta_0) \
+    from diffcmb.alm_utils import packed_dof_per_multipole
+    for nu in (0.5, 4.0, 8.0):
+        L = 5
+        k = float(packed_dof_per_multipole(L + 1)[L])
+        beta_0 = nu * 1e-6 / 2.0
+        alpha = k / 2.0 + nu / 2.0
+
+        def log_p_r(r, alpha=alpha, beta_0=beta_0, k=k):
+            return (k - 1.0) * np.log(r) - alpha * np.log(r ** 2 / 2.0 + beta_0) \
                 + gammaln(alpha)
 
         r1, r2 = 1e3, 1e4        # deep in the tail
         slope = (log_p_r(r2) - log_p_r(r1)) / (np.log(r2) - np.log(r1))
-        assert abs(slope - (1.0 - nu)) < 1e-6, \
-            f"nu={nu}: tail exponent {slope:.4f}, expected {1.0 - nu:.4f}"
+        assert abs(slope - (-1.0 - nu)) < 1e-6, \
+            f"nu={nu}: tail exponent {slope:.4f}, expected {-1.0 - nu:.4f}"
 
 
 @pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
@@ -1445,3 +1456,114 @@ def test_cl_phiphi_proper_prior_is_not_scale_free_in_phi_amplitude():
         f"proper prior is not restoring the amplitude: {vals}"
     # And it must genuinely diverge, not merely tick up.
     assert vals[-1] > 10.0 * vals[0]
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_packed_dof_per_multipole_matches_the_actual_packing():
+    """k_L must be counted from the packing, not assumed to be 2L+1.
+
+    `splittosingularalm` writes `complex(real, 0)` when `m == 0 or m == 1`,
+    so Im(a_{L,1}) is forced to zero and every multipole carries 2L real dof.
+    Cross-checked against the independent (L, m) index map used by the
+    samplers, so the two descriptions of the layout cannot drift apart.
+    """
+    from diffcmb.alm_utils import packed_dof_per_multipole
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = 16
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    L_arr, _ = _alm_index_lm(lmax, n_real, n_imag)
+    dof = packed_dof_per_multipole(lmax)
+    for L in range(2, lmax):
+        assert dof[L] == int((L_arr == L).sum()) == 2 * L, (
+            f"L={L}: dof bookkeeping disagrees with the packing"
+        )
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_packed_S_L_is_chi_squared_with_the_packed_dof():
+    """S_L | C ~ C * chi^2_{k_L}. This is what fixes the InvGamma exponent.
+
+    Establishes the premise the Block 1 / Block 4 conditionals rest on, using
+    the real synalm -> pack path rather than a hand-built draw. Checks the
+    variance as well as the mean: matching only the mean cannot distinguish
+    chi^2_k from other distributions with the same first moment, and it was
+    the *shape* parameter that was wrong.
+    """
+    from diffcmb.alm_utils import packed_dof_per_multipole
+    from diffcmb.lensing import _alm_hp_to_packed, compute_sl_phi_np
+
+    lmax, n = 16, 3000
+    cl = np.full(lmax, 1e-6)
+    dof = packed_dof_per_multipole(lmax)
+    S = np.empty((n, lmax))
+    for i in range(n):
+        np.random.seed(400000 + i)
+        alm = hp.synalm(cl, lmax=lmax - 1, new=True).astype(np.complex128)
+        S[i] = compute_sl_phi_np(_alm_hp_to_packed(alm, lmax), lmax)
+
+    for L in (2, 3, 5, 10, 15):
+        x = S[:, L] / cl[L]
+        k = float(dof[L])
+        # chi^2_k has mean k and variance 2k; 3000 draws gives ~2.5% on the
+        # mean and ~5% on the implied k from the variance.
+        assert abs(x.mean() - k) / k < 0.06, (
+            f"L={L}: <S_L>/C = {x.mean():.2f}, expected k={k:.0f} (2L+1 would be {2*L+1})"
+        )
+        assert abs(2.0 * x.mean() ** 2 / x.var() - k) / k < 0.12, (
+            f"L={L}: variance implies k={2*x.mean()**2/x.var():.2f}, expected {k:.0f}"
+        )
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_block4_conditional_passes_an_independent_generative_sbc():
+    """The test that would have caught the 2026-08-31 exponent bug.
+
+    A probability-integral-transform check against the sampler's own stated
+    conditional validates the DRAW, not the DERIVATION -- it passes for any
+    exponent, because the code and the reference share the mistake. (The
+    2026-08-31 production PIT check returned KS_p=0.53 while the shape was
+    half a unit wrong.)
+
+    This instead runs a genuine Gibbs-pair SBC:
+        C_true ~ InvGamma(nu/2, nu*C_fid/2)        [the prior]
+        phi    ~ N(0, C_true)                      [synalm -> pack]
+        C'     ~ sample_cl_phiphi_given_phi(phi)   [the conditional]
+    Under a correct conditional the rank of C_true among the C' draws is
+    uniform. Nothing here reuses the code's own exponent, so a wrong shape
+    parameter shows up immediately. Requires a proper prior: the flat default
+    is improper and admits no draw of C_true at all, which is precisely why
+    the bug survived for so long.
+    """
+    from scipy import stats
+
+    from diffcmb.lensing import _alm_hp_to_packed, sample_cl_phiphi_given_phi
+
+    lmax, nu, n_real_iter, n_draw = 16, 6.0, 300, 40
+    cl_fid = np.full(lmax, 1e-6)
+    rng = np.random.default_rng(0)
+    us = []
+    for it in range(n_real_iter):
+        cl_true = np.zeros(lmax)
+        for L in range(2, lmax):
+            cl_true[L] = (nu * cl_fid[L] / 2.0) / rng.gamma(nu / 2.0)
+        np.random.seed(600000 + it)
+        phi = _alm_hp_to_packed(
+            hp.synalm(cl_true, lmax=lmax - 1, new=True).astype(np.complex128), lmax
+        )
+        draws = np.array([
+            np.exp(sample_cl_phiphi_given_phi(phi, lmax, rng=rng, prior_nu=nu,
+                                              cl_phiphi_fid=cl_fid))
+            for _ in range(n_draw)
+        ])
+        for L in (2, 5, 10, 15):
+            us.append((np.sum(draws[:, L - 2] < cl_true[L]) + 0.5) / (n_draw + 1.0))
+
+    us = np.array(us)
+    p = stats.kstest(us, "uniform").pvalue
+    assert abs(us.mean() - 0.5) < 0.035, (
+        f"Block 4 conditional is biased: mean rank {us.mean():.4f}, expected 0.5. "
+        f"An exponent assuming 2L+1 dof gives ~0.45; L-1+nu/2 gives ~0.40."
+    )
+    assert p > 1e-4, f"Block 4 conditional fails generative SBC (KS p={p:.2g})"
