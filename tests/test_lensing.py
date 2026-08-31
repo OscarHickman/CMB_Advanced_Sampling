@@ -1267,3 +1267,181 @@ def test_block4_fixed_spectrum_prior_DOES_constrain_amplitude():
         assert fixed_prior_term(s * phi_packed) == pytest.approx(
             s * s * base, rel=1e-10
         )
+
+
+# ---------------------------------------------------------------------------
+# Block 4 with a PROPER (weakly informative) prior on C_L^phiphi
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_cl_phiphi_prior_nu_none_is_bit_identical_to_flat_prior():
+    """`prior_nu=None` must reproduce the old flat-improper-prior draw exactly.
+
+    Same "None = old behaviour, zero effect on existing call sites" contract
+    the beam/noise_map kwargs follow. Bit-identity (not closeness) because the
+    two paths must consume the RNG stream identically too -- otherwise every
+    existing chain's reproducibility silently changes.
+    """
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+
+    lmax = 12
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi = np.random.default_rng(0).normal(scale=1e-3, size=n_real + n_imag)
+
+    a = sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(7))
+    b = sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(7),
+                                   prior_nu=None, cl_phiphi_fid=None)
+    np.testing.assert_allclose(a, b, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_cl_phiphi_proper_prior_matches_conjugate_invgamma():
+    """The proper-prior draw must come from the exact conjugate posterior.
+
+    Prior C_L ~ InvGamma(alpha_0, beta_0) with alpha_0 = nu/2,
+    beta_0 = nu*C_L^fid/2 (nu = "effective number of prior pseudo-modes",
+    matching how the data contributes 2L+1 real modes). Multiplying by the
+    Gaussian phi prior C^{-(2L+1)/2} exp(-S_L/2C) gives
+
+        C_L | phi ~ InvGamma(L - 0.5 + nu/2, (S_L + nu*C_L^fid)/2).
+
+    Checked by KS against that law rather than by re-deriving it in the test.
+    """
+    from scipy import stats
+
+    from diffcmb.lensing import compute_sl_phi_np, sample_cl_phiphi_given_phi
+
+    lmax = 8
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    rng = np.random.default_rng(3)
+    phi = rng.normal(scale=1e-3, size=n_real + n_imag)
+    nu = 6.0
+    cl_fid = np.full(lmax, 1e-6)
+
+    draws = np.array([
+        np.exp(sample_cl_phiphi_given_phi(phi, lmax, rng=rng, prior_nu=nu,
+                                          cl_phiphi_fid=cl_fid))
+        for _ in range(4000)
+    ])
+
+    S = compute_sl_phi_np(phi, lmax)
+    for i in range(lmax - 2):
+        L = i + 2
+        alpha = L - 0.5 + nu / 2.0
+        beta = (S[L] + nu * cl_fid[L]) / 2.0
+        p = stats.kstest(draws[:, i], "invgamma", args=(alpha, 0.0, beta)).pvalue
+        assert p > 1e-3, f"L={L}: draws do not match conjugate posterior (KS p={p:.2g})"
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_cl_phiphi_proper_prior_shrinks_an_inflated_amplitude_toward_fiducial():
+    """The whole point: unlike the flat prior, this one pulls C_L back down.
+
+    Guards the 2026-08-28 failure mode (job 11887897) where phi inflated
+    1e3-1e5x and nothing opposed it. With phi 100x too large in amplitude
+    (1e4x in power), the flat-prior draw tracks the inflated S_L essentially
+    exactly, while the proper prior must land materially closer to fiducial.
+    """
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+
+    lmax = 10
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    cl_fid = np.full(lmax, 1e-6)
+    rng = np.random.default_rng(5)
+    # phi drawn at the fiducial scale, then inflated 100x in amplitude.
+    phi = rng.normal(scale=np.sqrt(1e-6), size=n_real + n_imag) * 100.0
+
+    flat = np.exp([sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(k))
+                   for k in range(200)]).mean(axis=0)
+    proper = np.exp([
+        sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(k),
+                                   prior_nu=6.0, cl_phiphi_fid=cl_fid)
+        for k in range(200)
+    ]).mean(axis=0)
+
+    # Both are still above fiducial (the data really does say phi is large),
+    # but the proper prior must shrink every multipole toward it.
+    assert np.all(proper < flat), "proper prior failed to shrink an inflated C_L"
+    assert np.all(proper > cl_fid[2:lmax]), "prior over-shrank past the fiducial"
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_cl_phiphi_prior_nu_must_exceed_2_for_a_proper_phi_marginal():
+    """nu > 2 is a correctness requirement, not a taste parameter.
+
+    Integrating C_L out of the joint leaves a phi marginal
+        p(r) ∝ r^{2L} (r^2/2 + beta_0)^{-(L - 0.5 + nu/2)}   [r^2 = S_L]
+    whose large-r tail is r^{1-nu}. That is normalisable only for nu > 2;
+    at nu = 2 it decays as 1/r and still diverges logarithmically, which is
+    exactly the improper-prior pathology this feature exists to remove.
+    A nu that silently produced an improper target would be worse than no
+    feature at all, so the API must reject it.
+    """
+    from diffcmb.lensing import sample_cl_phiphi_given_phi
+
+    lmax = 6
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi = np.random.default_rng(1).normal(scale=1e-3, size=n_real + n_imag)
+    cl_fid = np.full(lmax, 1e-6)
+
+    for bad_nu in (0.5, 2.0):
+        with pytest.raises(ValueError, match="nu"):
+            sample_cl_phiphi_given_phi(phi, lmax, rng=np.random.default_rng(0),
+                                       prior_nu=bad_nu, cl_phiphi_fid=cl_fid)
+
+    # And the tail exponent itself: verify numerically that the marginal
+    # falls off as r^{1-nu}, so the nu>2 threshold is the real boundary.
+    from scipy.special import gammaln
+    for nu in (4.0, 8.0):
+        L, alpha_0, beta_0 = 5, nu / 2.0, nu * 1e-6 / 2.0
+        alpha = L - 0.5 + alpha_0
+
+        def log_p_r(r, alpha=alpha, beta_0=beta_0, L=L):
+            return (2 * L) * np.log(r) - alpha * np.log(r ** 2 / 2.0 + beta_0) \
+                + gammaln(alpha)
+
+        r1, r2 = 1e3, 1e4        # deep in the tail
+        slope = (log_p_r(r2) - log_p_r(r1)) / (np.log(r2) - np.log(r1))
+        assert abs(slope - (1.0 - nu)) < 1e-6, \
+            f"nu={nu}: tail exponent {slope:.4f}, expected {1.0 - nu:.4f}"
+
+
+@pytest.mark.skipif(not HAS_HEALPY, reason="healpy required")
+def test_cl_phiphi_proper_prior_is_not_scale_free_in_phi_amplitude():
+    """Contrast case to test_block4_refitted_prior_is_scale_free_in_phi_amplitude.
+
+    That test pins the flat-prior pathology: substituting Block 4's conditional
+    mean makes the phi prior term exactly constant along the scaling ray, so
+    nothing restrains the amplitude. With a proper prior the same substitution
+    must produce a term that GROWS with amplitude -- i.e. a real restoring
+    force. This is the property the whole feature is for.
+    """
+    from diffcmb.lensing import compute_sl_phi_np
+
+    lmax = 12
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    phi0 = np.random.default_rng(4).normal(scale=1e-3, size=n_real + n_imag)
+    nu, cl_fid = 6.0, np.full(lmax, 1e-6)
+
+    def prior_term(scale):
+        """0.5 * sum_L S_L / C_L at the conditional mean of C_L."""
+        S = compute_sl_phi_np(phi0 * scale, lmax)
+        total = 0.0
+        for L in range(2, lmax):
+            alpha = L - 0.5 + nu / 2.0
+            beta = (S[L] + nu * cl_fid[L]) / 2.0
+            c_mean = beta / (alpha - 1.0)          # InvGamma mean
+            total += 0.5 * S[L] / c_mean
+        return total
+
+    vals = [prior_term(s) for s in (0.1, 1.0, 10.0, 100.0)]
+    assert all(b > a for a, b in zip(vals, vals[1:])), \
+        f"proper prior is not restoring the amplitude: {vals}"
+    # And it must genuinely diverge, not merely tick up.
+    assert vals[-1] > 10.0 * vals[0]

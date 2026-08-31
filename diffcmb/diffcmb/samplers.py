@@ -923,6 +923,7 @@ def run_gibbs_chain(
     phi_fisher_n_probes=8,
     phi_block_n_probes=6,
     sample_cl_phiphi=False,
+    cl_phiphi_prior_nu=None,
     phi_rescale_move=False,
     phi_rescale_proposal_scale=0.1,
     phi_sampler='hmc',
@@ -1068,6 +1069,22 @@ def run_gibbs_chain(
         raise ValueError("cl_phiphi_full (Block 3) requires alm_sampler='hmc' or 'cg'")
     if sample_cl_phiphi and not sample_phi:
         raise ValueError("sample_cl_phiphi=True (Block 4) requires cl_phiphi_full to be given")
+    if cl_phiphi_prior_nu is not None and not sample_cl_phiphi:
+        raise ValueError(
+            "cl_phiphi_prior_nu is only meaningful with sample_cl_phiphi=True "
+            "(Block 4); with Block 4 off, cl_phiphi_full is already a fixed "
+            "proper prior."
+        )
+    # Snapshot the fiducial C_L^phiphi that the proper Block 4 prior is centred
+    # on. This MUST be taken before the sweep loop, which rebinds
+    # cl_phiphi_full to the freshly drawn spectrum every sweep -- centring the
+    # prior on that moving value would make it chase the chain and exert no
+    # restoring force at all, silently reproducing the improper-prior
+    # behaviour it exists to fix.
+    cl_phiphi_prior_fid = (
+        np.array(cl_phiphi_full, dtype=np.float64, copy=True)
+        if cl_phiphi_prior_nu is not None else None
+    )
     if phi_mass_matrix not in ('prior', 'fisher', 'block'):
         raise ValueError(f"phi_mass_matrix must be 'prior', 'fisher', or 'block', got {phi_mass_matrix!r}")
     if phi_rescale_move and not sample_cl_phiphi:
@@ -1596,7 +1613,11 @@ def run_gibbs_chain(
         # graph, but a tf.Variable .assign() is read live at call time).
         if sample_cl_phiphi:
             phi_now_np = phi_whitener.unwhiten_np(phi_state_var.numpy())
-            new_lncl_phiphi = sample_cl_phiphi_given_phi(phi_now_np, lmax, rng)
+            new_lncl_phiphi = sample_cl_phiphi_given_phi(
+                phi_now_np, lmax, rng,
+                prior_nu=cl_phiphi_prior_nu,
+                cl_phiphi_fid=cl_phiphi_prior_fid,
+            )
             cl_phiphi_full = cl_phiphi_full.copy()
             cl_phiphi_full[2:lmax] = np.exp(new_lncl_phiphi)
             _sync_phi_state_to_spectrum(cl_phiphi_full, phi_now_np)

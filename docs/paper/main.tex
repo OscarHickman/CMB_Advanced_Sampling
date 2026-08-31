@@ -189,9 +189,59 @@ lensed log-probability target and its autodiff gradient unchanged.
 \label{sec:block4}
 
 Given the current $\phi$ amplitudes, the conditional $p(\clpp \mid \phi)$ is
-exactly inverse-Gamma by the same conjugacy argument as Block 1.
-This block resamples the $\phi$ prior spectrum every sweep and rebuilds the
+exactly inverse-Gamma by the same conjugacy argument as Block 1,
+\begin{equation}
+  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(L - \tfrac12,\; S_L/2\right),
+  \qquad S_L = \sum_{m=-L}^{L} |\phi_{Lm}|^2 ,
+  \label{eq:block4}
+\end{equation}
+and this block resamples the $\phi$ prior spectrum every sweep and rebuilds the
 Block 3 mass matrix to match, closing the joint posterior.
+
+\subsubsection*{The prior on \texorpdfstring{$\clpp$}{ClPhiPhi}, and why it is
+not a free choice}
+\label{sec:clpp-prior}
+
+Equation~\eqref{eq:block4} is the conditional implied by a \emph{flat} prior on
+$\clpp$, which is improper. This is worth stating explicitly rather than
+leaving implicit, because it propagates into the $\phi$ block in a way that is
+easy to miss. Integrating $\clpp$ out of the joint gives a marginal on the
+field, $p(\phi) \propto S_L^{-(L-1/2)}$; against the radial measure for the
+$2L+1$ real components of $\phi_{Lm}$, $r^{2L}\,\mathrm{d}r$ with $S_L = r^2$,
+this is
+\begin{equation}
+  p(r) \;\propto\; r^{\,1} ,
+\end{equation}
+i.e.\ flat in $S_L$ --- improper, and \emph{increasing} with amplitude. The
+$\phi$ amplitude is therefore constrained by the lensing likelihood alone, with
+no prior restoring force. Equivalently, substituting the conditional mean of
+Eq.~\eqref{eq:block4} into the Gaussian $\phi$ prior term gives
+$\tfrac12 \sum_L S_L/\clpp = \sum_L (L - 3/2)$, independent of $\phi$: the
+prior is exactly scale-free along the amplitude ray.
+
+In practice this is benign whenever the lensing signal-to-noise is sufficient
+to pin the amplitude, which it is in the configurations reported here. It is
+not benign as a matter of principle, and it has two concrete consequences that
+we report rather than gloss: it removes the only safeguard against an
+amplitude runaway if the temperature block is poorly initialised, and it means
+a rank test of $\phi$ against a truth drawn from a \emph{proper} Gaussian prior
+is not a calibration test of this target (Sec.~\ref{sec:sbc}).
+
+We therefore also provide the conjugate proper alternative, a weakly
+informative $\mathrm{InvGamma}(\nu/2,\, \nu C_L^{\phi\phi,\,\rm fid}/2)$ prior centred on
+a fiducial spectrum, under which
+\begin{equation}
+  \clpp \mid \phi \;\sim\; \mathrm{InvGamma}\!\left(L - \tfrac12 + \tfrac{\nu}{2},\;
+  \big(S_L + \nu\,C_L^{\phi\phi,\,\rm fid}\big)/2\right).
+  \label{eq:block4-proper}
+\end{equation}
+Here $\nu$ reads as an effective number of prior pseudo-modes, on the same
+footing as the $2L+1$ real modes the data supplies at multipole $L$, so the
+prior regularises the lowest multipoles --- where the improper prior does its
+damage --- and is negligible at high $L$. The marginal tail becomes
+$p(r) \propto r^{\,1-\nu}$, so the target is proper only for $\nu > 2$; we use
+$\nu = \placeholder{6}$, and reject $\nu \le 2$ at the API level rather than
+allowing a choice that appears to fix the problem while leaving it in place.
 
 % --- Forward model ---
 \subsection{Differentiable lensing operator}
@@ -240,12 +290,58 @@ of a sampler that has not yet equilibrated from a Wiener-filtered starting point
 \subsection{Simulation-based calibration (SBC)}
 \label{sec:sbc}
 
-\placeholder{
-Multi-realization rank/coverage test at $\lmax \approx 128$: $\sim 10$--20
-independent chains, Cook--Gelman--Rubin rank uniformity for $(\alm, \phi)$,
-interval coverage for $(\cl, \clpp)$.
-Result: \todo{pass/fail and coverage fractions.}
-}
+We run 12 independent chains at $\lmax = \placeholder{64}$, each with its own
+$(\alm^{\rm true}, \phi^{\rm true}, \mathrm{noise})$ triple drawn from the
+fiducial spectra and warm-started away from the truth, and rank the truth's
+binned power within each posterior.
+
+\subsubsection*{The rank statistic requires its own null}
+
+The spectrum-level statistic must be calibrated before any departure from
+uniformity is read as bias, and this is not a technicality. Ranking the truth's
+\emph{realized} power $S_L/(2L+1)$ against posterior draws of $\clpp$ compares
+it against the \emph{mode} of Eq.~\eqref{eq:block4}, since
+$\beta/(\alpha+1) = S_L/(2L+1)$. The inverse-Gamma is right-skewed, so
+$P(\text{draw} < \text{mode}) < 1/2$ \emph{for an exact sampler}, and averaging
+over $\ell$ within a bin shrinks the spread while preserving the offset, driving
+the mean rank toward zero. A naive uniformity test therefore rejects a correct
+sampler with arbitrarily high confidence at large bin width.
+
+We accordingly compare each observed rank against a null simulated from the
+conditional itself. For $\cl^{TT}$ the observed bin means
+$\placeholder{0.094, 0.104, 0.094, 0.375}$ agree with the simulated null
+$\placeholder{0.095, 0.095, 0.115, 0.345}$ in every bin. For $\clpp$ the null
+must additionally retain the chain's own sweep-to-sweep scatter in $\phi$,
+which contributes a common-mode variance across $\ell$ that does not average
+down within a bin; with that included, the observed
+$\placeholder{0.281, 0.323, 0.323, 0.229}$ again lies within the null band
+throughout. We report these rows as interval coverage, not calibration, since
+the implied $\cl$ prior is flat and improper and no strict rank exists.
+
+\subsubsection*{Block-level exactness}
+
+Independently of the rank test, we verify Block 4 directly on the production
+chains: using each sweep's $(\phi, \clpp)$ pair, the probability integral
+transform $u = F_{\mathrm{InvGamma}(L-1/2,\,S_L(\phi)/2)}(\clpp)$ is uniform
+(\placeholder{$\mathrm{KS}\ p = 0.53$}, \placeholder{$N = 17856$}), while a
+deliberately lag-shifted control is rejected --- confirming the test has power
+rather than merely failing to reject.
+
+\subsubsection*{Field-level calibration}
+
+The field ranks are the statistic this design supports directly. The $\alm$
+ranks are consistent with uniformity. The $\phi$ ranks are not
+(\placeholder{$\bar u = 0.367$}), and we attribute this to the improper prior
+of Sec.~\ref{sec:clpp-prior} rather than to the sampler: with the flat prior
+the target's $\phi$ marginal is flat in $S_L$, while $\phi^{\rm true}$ was drawn
+from a proper Gaussian, so the two distributions differ by construction and the
+rank has no reason to be uniform. We resolve this in two ways, and report both:
+by fixing $\clpp$ at the fiducial spectrum, under which the $\phi$ prior is
+proper and identical to the generative process; and by adopting the proper
+conjugate prior of Eq.~\eqref{eq:block4-proper} and drawing the truth from that
+same joint prior, which restores a strict SBC test while retaining the $\clpp$
+block that produces the joint posterior of Sec.~\ref{sec:joint-posterior}.
+\todo{Insert final rank figures and $p$-values from both runs.}
 
 \subsection{Joint $(\cl^{TT}, \clpp)$ posterior}
 \label{sec:joint-posterior}
@@ -308,7 +404,7 @@ that reference.
 \textbf{Outlook.}
 Immediate extensions include:
 real Planck data (\placeholder{in prep});
-ΛCDM parameter inference from the posterior $\cl^{TT}$ chains;
+$\Lambda$CDM parameter inference from the posterior $\cl^{TT}$ chains;
 polarisation (TQU) and LiteBIRD delensing forecasts via the spin-2 SHT
 extension of the current infrastructure.
 

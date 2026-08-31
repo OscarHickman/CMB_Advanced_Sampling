@@ -30,9 +30,19 @@ and the reason is structural rather than an implementation shortcut:
   An improper prior cannot be drawn from, so there is no way to generate
   C_l_true ~ p(C_l) and the spectra cannot carry a strict SBC rank.
 
-What this script therefore generates is the *conditional* ensemble: spectra
-held at the fiducial values, with alm_true ~ N(0, C_l^fid) and
+What this script therefore generates *by default* is the *conditional*
+ensemble: spectra held at the fiducial values, with alm_true ~ N(0, C_l^fid) and
 phi_true ~ N(0, C_L^phiphi,fid) drawn from their exactly-known Gaussian priors.
+
+EXCEPTION, and the way to get a genuinely strict SBC rank for phi:
+`--cl_phiphi_prior_nu NU` puts a proper conjugate InvGamma(NU/2, NU*C_L^fid/2)
+prior on C_L^phiphi, which makes the target proper in the phi amplitude (the
+default flat prior leaves the phi marginal flat in S_L -- improper and rising
+with amplitude, which is why the Block-4-ON phi rank in job 11899585 could not
+be read as calibration evidence). In that mode the truth is drawn from the SAME
+joint prior -- C_L ~ InvGamma, then phi ~ N(0, C_L) -- so generative process and
+sampler target agree and the phi rank is a valid SBC statistic. C_l^TT is
+untouched and its row remains interval coverage only.
 The field-level ranks (alm, phi) are the statistic this design supports most
 directly. The spectrum-level ranks are still computed by the aggregator, but
 they are an interval-coverage check against the realized power, not a strict
@@ -67,6 +77,9 @@ LCDM_PARAMS = [67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066]
 _STREAM_TRUTH = 1_000_000
 _STREAM_START = 2_000_000
 _STREAM_NOISE = 3_000_000
+# Separate stream for the C_L^phiphi prior draw, so turning the proper prior on
+# does not shift the alm/phi/noise streams and change every other realization.
+_STREAM_CLPP_PRIOR = 4_000_000
 
 
 def get_cl_phiphi(lmax):
@@ -133,6 +146,13 @@ def main():
                         "correction) is the only setting that has ever cleared "
                         "the equilibration gate -- job 11781626, lmax=64, "
                         "Block 4 OFF (achievements.md).")
+    p.add_argument("--cl_phiphi_prior_nu", type=float, default=None,
+                   help="Put a PROPER conjugate InvGamma(nu/2, nu*C_L^fid/2) "
+                        "prior on C_L^phiphi instead of the default flat "
+                        "improper one (requires Block 4; nu>2). When set, the "
+                        "TRUTH is drawn from that same joint prior "
+                        "(C_L ~ InvGamma, then phi ~ N(0,C_L)) so the phi rank "
+                        "is a valid SBC test of the proper-prior target.")
     p.add_argument("--no_sample_cl_phiphi", action="store_true",
                    help="Disable Block 4 (C_L^phiphi|phi). Required for the "
                         "lmax=64 GO configuration: Block 4 ON degrades phi "
@@ -146,9 +166,15 @@ def main():
     out = os.path.join(args.outdir, f"chain_r{r:03d}.npz")
 
     print(f"=== Coverage ensemble, realization {r} (lmax={lmax}, nside={nside}) ===")
-    print("Spectra held at fiducial; alm_true/phi_true drawn from their Gaussian "
-          "priors.\nSpectrum-level ranks are interval coverage, NOT strict SBC "
-          "(improper flat\nimplied prior -- see this script's header).\n")
+    if args.cl_phiphi_prior_nu is not None:
+        print(f"C_L^phiphi carries a PROPER conjugate prior (nu="
+              f"{args.cl_phiphi_prior_nu}); the truth is drawn from that same "
+              "joint prior, so the\nphi rank IS a valid SBC test here. C_l^TT is "
+              "still flat/improper, so its row stays\ninterval coverage only.\n")
+    else:
+        print("Spectra held at fiducial; alm_true/phi_true drawn from their Gaussian "
+              "priors.\nSpectrum-level ranks are interval coverage, NOT strict SBC "
+              "(improper flat\nimplied prior -- see this script's header).\n")
 
     model = CosmologyAdvancedSampling(
         _lmax=lmax, _NSIDE=nside, _noisesig=args.noisesig,
@@ -158,7 +184,30 @@ def main():
     assert len(model.unmasked_idx) == model.NPIX, "ensemble assumes full-sky data"
 
     cl_true = call_CAMB_map(LCDM_PARAMS, lmax)
-    cl_phiphi_true = get_cl_phiphi(lmax)
+    cl_phiphi_fid = get_cl_phiphi(lmax)
+
+    # With a PROPER prior on C_L^phiphi the generative process must match the
+    # sampler's target, or the rank test is invalid in the other direction --
+    # the same mistake, mirrored, that makes the Block-4-ON phi rank
+    # uninterpretable today (truth from a proper N(0,C_fid), target improper).
+    # So draw C_L^phiphi from the prior first, then phi from N(0, C_L).
+    # The prior stays CENTRED ON THE FIDUCIAL (cl_phiphi_fid) -- that is what
+    # run_gibbs_chain is told to use -- while the truth is one draw from it.
+    if args.cl_phiphi_prior_nu is not None:
+        nu = float(args.cl_phiphi_prior_nu)
+        if nu <= 2.0:
+            raise ValueError(f"--cl_phiphi_prior_nu must be > 2 (got {nu}); "
+                             "the phi marginal is improper at or below 2.")
+        rng_prior = np.random.default_rng(_STREAM_CLPP_PRIOR + r)
+        cl_phiphi_true = np.zeros(lmax, dtype=np.float64)
+        for ell in range(2, lmax):
+            alpha0, beta0 = nu / 2.0, nu * cl_phiphi_fid[ell] / 2.0
+            cl_phiphi_true[ell] = beta0 / rng_prior.gamma(alpha0, scale=1.0)
+        print(f"C_L^phiphi truth drawn from the proper prior (nu={nu}); "
+              f"draw/fiducial ratio min={np.min(cl_phiphi_true[2:lmax] / cl_phiphi_fid[2:lmax]):.3f} "
+              f"max={np.max(cl_phiphi_true[2:lmax] / cl_phiphi_fid[2:lmax]):.3f}")
+    else:
+        cl_phiphi_true = cl_phiphi_fid
 
     alm_true_hp, phi_true_hp = _synalm_pair(
         cl_true, cl_phiphi_true, lmax, _STREAM_TRUTH + r
@@ -247,12 +296,13 @@ def main():
         hmc_step_size=args.hmc_step_size,
         n_lfs=args.n_lfs,
         initial_params=x0,
-        cl_phiphi_full=cl_phiphi_true,
+        cl_phiphi_full=cl_phiphi_fid,
         phi_initial=phi_start_packed,
         phi_hmc_step_size=args.phi_hmc_step_size,
         phi_n_lfs=args.phi_n_lfs,
         phi_mass_matrix=args.phi_mass_matrix,
         sample_cl_phiphi=sample_cl_phiphi,
+        cl_phiphi_prior_nu=args.cl_phiphi_prior_nu,
         seed=r,
         checkpoint_path=ckpt,
         checkpoint_every=args.checkpoint_every,
@@ -298,6 +348,9 @@ def main():
         "alm_samples": samples, "phi_samples": phi_samples,
         "logp": logp, "accepts": accepts,
         "cl_true": cl_true, "cl_phiphi_true": cl_phiphi_true,
+        "cl_phiphi_fid": cl_phiphi_fid,
+        "cl_phiphi_prior_nu": (np.nan if args.cl_phiphi_prior_nu is None
+                               else float(args.cl_phiphi_prior_nu)),
         "alm_true_packed": alm_true_packed,
         "phi_true_packed": phi_true_packed,
         "start_cosine_similarity": start_corr,

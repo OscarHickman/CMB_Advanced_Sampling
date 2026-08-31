@@ -1226,3 +1226,74 @@ def test_gibbs_chain_seed_is_immune_to_prior_global_tf_rng_state(small_model):
             first[idx], second[idx], rtol=0, atol=0,
             err_msg=f"{name} samples differ => seed does not control the HMC blocks",
         )
+
+
+@skip_no_tfp
+def test_cl_phiphi_prior_nu_requires_block4():
+    """The kwarg is meaningless without Block 4 and must say so, not no-op."""
+    from diffcmb import run_gibbs_chain
+    with pytest.raises(ValueError, match="cl_phiphi_prior_nu"):
+        run_gibbs_chain(None, n_samples=1, cl_phiphi_prior_nu=6.0)
+
+
+@skip_no_tfp
+def test_gibbs_chain_proper_cl_phiphi_prior_restrains_an_inflated_phi(small_model):
+    """End-to-end: the proper Block 4 prior must pull an inflated C_L^phiphi back.
+
+    This is the sampler-level counterpart to the lensing.py unit tests, and it
+    guards the subtlety that makes or breaks the feature: run_gibbs_chain
+    rebinds `cl_phiphi_full` to the newly drawn spectrum every sweep, so the
+    prior's fiducial has to be snapshotted BEFORE the loop. If it were read
+    from the live variable the prior would chase the chain, exert no restoring
+    force, and silently degrade to the improper behaviour it exists to remove
+    -- while still passing every unit test of the conditional itself.
+
+    Setup: start phi 30x too large in amplitude (900x in power) at a known
+    fiducial spectrum, run both configurations from the identical state, and
+    require the proper-prior chain to end materially closer to fiducial.
+    """
+    from diffcmb import run_gibbs_chain
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    var = np.empty(n_real + n_imag)
+    real_idx = np.arange(n_real)
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    var[n_real:] = C0 / 2.0
+    phi_initial = np.random.default_rng(99).normal(scale=np.sqrt(var)) * 30.0
+
+    # 60 sweeps, not 30: a fiducial that chases the chain still looks correct
+    # for the first few sweeps (it starts AT the fiducial) and only relaxes to
+    # the flat-prior answer geometrically, at rate nu/(2L-1+nu) per sweep. The
+    # window has to be long enough for that relaxation to show up, or the test
+    # cannot see the bug it exists to catch. Verified by mutation: reading the
+    # live cl_phiphi_full here gives 6.82 e-folds vs 4.72 for the correct
+    # snapshot (flat-prior reference: 6.76), so the 1.0 e-fold margin below
+    # separates them with room to spare.
+    common = {
+        "n_samples": 60, "n_burnin": 10, "hmc_step_size": 0.01, "n_lfs": 5,
+        "cl_phiphi_full": cl_phiphi_full, "phi_initial": phi_initial,
+        "phi_hmc_step_size": 0.01, "phi_n_lfs": 5, "sample_cl_phiphi": True,
+        "seed": 7,
+    }
+    flat = run_gibbs_chain(small_model, **common)
+    proper = run_gibbs_chain(small_model, cl_phiphi_prior_nu=40.0, **common)
+
+    # Compare on the log scale against the fiducial: how many e-folds above C0
+    # does each configuration sit, averaged over multipoles and sweeps?
+    flat_excess = float(np.mean(flat[5] - np.log(C0)))
+    proper_excess = float(np.mean(proper[5] - np.log(C0)))
+
+    assert flat_excess > 1.0, "test setup failed: flat-prior run is not inflated"
+    assert proper_excess < flat_excess - 1.0, (
+        f"proper prior did not restrain the amplitude "
+        f"(proper {proper_excess:.3f} vs flat {flat_excess:.3f} e-folds above "
+        f"fiducial) -- check that the prior fiducial is snapshotted before the "
+        f"sweep loop rather than read from the rebound cl_phiphi_full"
+    )

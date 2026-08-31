@@ -149,7 +149,8 @@ def compute_sl_phi_np(phi_packed: np.ndarray, lmax: int) -> np.ndarray:
     return S
 
 
-def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> np.ndarray:
+def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None,
+                               prior_nu=None, cl_phiphi_fid=None) -> np.ndarray:
     """Sample ln(C_L^phiphi) | phi for L=2..lmax-1 from the exact inverse-Gamma
     conditional implied by log_prob_phi_block's Gaussian prior term:
 
@@ -157,6 +158,40 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> n
 
     where S_L = sum_{m=-L}^{L} |phi_{L,m}|^2 (compute_sl_phi_np). Same
     structure as model.py::sample_cl_given_alm (Block 1), applied to phi.
+
+    OPTIONAL PROPER PRIOR (`prior_nu`, `cl_phiphi_fid`; both None = the exact
+    old behaviour, following the same contract as the beam/noise_map kwargs).
+
+    The default conditional above corresponds to a FLAT, IMPROPER prior on
+    C_L^phiphi, and that is not a cosmetic issue. Integrating C_L out of the
+    joint leaves a marginal on phi proportional to S_L^{-(L-0.5)}; against the
+    (2L+1)-component radial measure r^{2L}dr (with S_L = r^2) that is
+
+        p(r) ∝ r^1,
+
+    i.e. FLAT IN S_L -- improper, and *rising* with amplitude. The phi
+    amplitude is then constrained by the lensing likelihood alone, which is
+    the mechanism behind the 2026-08-28 coverage-ensemble failure (phi frozen
+    1e3-1e5x above truth, job 11887897) and the reason the phi SBC rank in the
+    2026-08-31 ensemble (job 11899585, mean_u=0.367) is not a valid
+    calibration test: the truth was drawn from a proper N(0, C_L^phiphi,fid)
+    the sampler is not targeting.
+
+    Passing `prior_nu=nu` with a fiducial spectrum places a conjugate
+    InvGamma(alpha_0 = nu/2, beta_0 = nu*C_L^fid/2) prior on each C_L, so
+
+        C_L^phiphi | phi ~ InvGamma(L - 0.5 + nu/2, (S_L + nu*C_L^fid)/2).
+
+    `nu` reads as an effective number of prior "pseudo-modes", on the same
+    footing as the 2L+1 real modes the data supplies at multipole L -- so
+    nu is weak where the data is informative (high L) and does most of its
+    work at low L, which is exactly where the improper prior hurts.
+
+    REQUIREMENT nu > 2, enforced. With the prior in place the marginal tail
+    becomes p(r) ∝ r^{1-nu}, which is normalisable only for nu > 2; at nu = 2
+    it decays as 1/r and still diverges logarithmically. A nu <= 2 would leave
+    the target improper while *appearing* to fix it, so it is rejected rather
+    than accepted with a warning.
 
     Note on clipping: model.py::sample_cl_given_alm clips the sampled C_l to
     [3e-7, 3e6], a range tuned to typical CMB C_l units. C_L^phiphi lives on
@@ -177,6 +212,29 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> n
             "Non-finite values (NaNs/Infs) detected in phi_packed during "
             "sample_cl_phiphi_given_phi!"
         )
+    use_proper_prior = prior_nu is not None
+    if use_proper_prior:
+        prior_nu = float(prior_nu)
+        if not np.isfinite(prior_nu) or prior_nu <= 2.0:
+            raise ValueError(
+                f"prior_nu must be > 2 for a proper phi marginal (got {prior_nu}); "
+                "the marginal tail goes as r^(1-nu), which is normalisable only "
+                "above 2. See this function's docstring."
+            )
+        if cl_phiphi_fid is None:
+            raise ValueError(
+                "cl_phiphi_fid is required when prior_nu is set -- the prior is "
+                "centred on it."
+            )
+        cl_phiphi_fid = np.asarray(cl_phiphi_fid, dtype=np.float64)
+        if cl_phiphi_fid.shape[0] < lmax:
+            raise ValueError(
+                f"cl_phiphi_fid must have length >= lmax ({lmax}), got "
+                f"{cl_phiphi_fid.shape[0]}"
+            )
+        if np.any(~np.isfinite(cl_phiphi_fid[2:lmax])) or np.any(cl_phiphi_fid[2:lmax] < 0.0):
+            raise ValueError("cl_phiphi_fid must be finite and non-negative for L=2..lmax-1")
+
     S = compute_sl_phi_np(phi_packed, lmax)
     lncl = np.empty(lmax - 2)
     for i in range(lmax - 2):
@@ -185,6 +243,10 @@ def sample_cl_phiphi_given_phi(phi_packed: np.ndarray, lmax: int, rng=None) -> n
         s_val = S[L]
         if not np.isfinite(s_val) or s_val < 0.0:
             s_val = 0.0
+        if use_proper_prior:
+            # Conjugate update: alpha_0 = nu/2, beta_0 = nu*C_L^fid/2.
+            alpha += prior_nu * 0.5
+            s_val = s_val + prior_nu * float(cl_phiphi_fid[L])
         beta = max(s_val * 0.5, 1e-60)
         g = rng.gamma(alpha, scale=1.0)
         val_cl = beta / max(g, 1e-300)
