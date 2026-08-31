@@ -13,6 +13,18 @@ The inference framework uses a four-block Gibbs sampler:
 3. **$\phi \mid a_{\ell m}, C_\ell$**: HMC sampling through a differentiable curved-sky forward lensing operator.
 4. **$C_L^{\phi\phi} \mid \phi$**: Exact inverse-Gamma draw for the lensing power spectrum.
 
+Both spectrum blocks draw from $\mathrm{InvGamma}(k_L/2 + a_0,\; b_0 + S_L/2)$, where $k_L$ is the number of *real* degrees of freedom the packed parameter vector carries at multipole $L$ and $a_0, b_0$ are the prior's shape and scale. $k_L$ is derived from the packing rather than assumed — see `CLAUDE.md`.
+
+By default $C_L^{\phi\phi}$ carries a flat prior, which is improper: integrating it out leaves a $\phi$ marginal that is flat in $S_L$ and rising with amplitude, so the $\phi$ amplitude is constrained by the lensing likelihood alone. Pass `cl_phiphi_prior_nu` for a proper conjugate prior instead; this is required for any strict calibration statement about $C_L^{\phi\phi}$.
+
+## Validation status
+
+Simulation-based calibration at $\ell_{\max}=64$, 12 independent chains, with $C_L^{\phi\phi}$ held fixed (so the $\phi$ prior is proper and matches the generative process): pooled mean normalised ranks $\bar u_\phi = 0.453$ ($p=0.17$) and $\bar u_{a_{\ell m}} = 0.537$ ($p=0.33$), both consistent with uniformity.
+
+Note that the rank statistic used for the *spectrum* rows is non-uniform even for an exact sampler — it ranks the truth against its own conditional's mode — so those rows must be read against the null from `scripts/validate_coverage_rank_nulls.py`, not against 0.5.
+
+**Known limitation:** the packed parameterisation forces $\mathrm{Im}(a_{\ell,1}) = 0$, so one real degree of freedom per multipole is missing and the model cannot represent a completely general sky (~20% of the modes at $\ell=2$, falling to 0.8% at $\ell=63$). This is tracked in `ROADMAP.md` as the largest open defect.
+
 ## Installation
 
 ```bash

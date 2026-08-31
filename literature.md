@@ -305,8 +305,23 @@ Treat the deficit-vs-mixing argument below as a hypothesis motivated by pre-fix 
 conclusion — re-derive the lag-1/deficit numbers post-fix (job 11849969 in flight) before citing
 them.**
 
-**No paper found reports or explains a comparable deficit.** State that plainly. What the
-literature does supply is a ranked list of suspects, all cheap to test:
+**⚠ 2026-08-31 — the ranking below is superseded by an internal finding. Two defects were
+found in this project's own code that are far better candidates than anything in the
+literature, and both have the low-ℓ concentration the deficit shows:**
+
+0. **The parameterisation is missing one real degree of freedom per multipole (leading
+   candidate, still OPEN).** `alm_utils.py::splittosingularalm` forces `Im(a_{ℓ,1}) = 0`, so
+   the model carries 2ℓ dof rather than 2ℓ+1 and **cannot represent a general sky**. Measured
+   unrepresentable power ≈ 1/(2ℓ+1): ~20% of the modes at ℓ=2, 0.8% at ℓ=63. A deficit that
+   grows toward low ℓ is exactly what this predicts, and it needs no appeal to mixing at all.
+   This is not a literature question — it is a bug (`ROADMAP.md`, `achievements.md`). Resolve
+   it before spending further effort attributing the deficit to sampler dynamics.
+0b. **Blocks 1 and 4 used an inverse-Gamma shape assuming 2ℓ+1 dof (fixed 2026-08-31).**
+   `E[C_ℓ]` was biased by (ℓ-1.5)/(ℓ-2) — 0.8% at ℓ=63 but 50% at ℓ=3. Again low-ℓ weighted.
+
+**No paper found reports or explains a comparable deficit.** State that plainly — and note
+that the reason may simply be that it was ours, not the field's. What the literature supplies
+is a ranked list of *external* suspects, all cheap to test, retained below for completeness:
 
 1. **Under-mixing retaining a Wiener-suppressed start (most likely).** Millea, Anderes & Wandelt
    (arXiv:2002.00965) make the parameterisation of the joint (f, φ) chain their central

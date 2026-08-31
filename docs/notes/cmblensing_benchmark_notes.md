@@ -1,5 +1,10 @@
 # CMBLensing.jl benchmark design — research notes (2026-07-29)
 
+*Reviewed 2026-08-31: the CMBLensing.jl facts below are unchanged. One diffcmb-side
+detail referenced here has moved on — the exact inverse-Gamma C_l block is still exact,
+but its shape parameter was corrected on 2026-08-31 (it assumed 2l+1 packed dof where the
+vector carries 2l; see `achievements.md`). Nothing in the benchmark design depends on it.*
+
 ## 1. CMBLensing.jl technical facts (from Millea, Anderes & Wandelt 2020, arXiv:2002.00965, and repo)
 
 ### Field representation / sampler
