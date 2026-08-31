@@ -26,21 +26,21 @@ make build-rust
 ## Quick Start
 
 ```python
-import numpy as np
-import tensorflow as tf
 from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 
 # Initialize model
 model = CosmologyAdvancedSampling(_lmax=30, _NSIDE=16, _noisesig=1.0, data_mode='synthetic')
 
-# Run joint Gibbs sampling over (alm, C_l)
-traces, cl_samples, _ = run_gibbs_chain(
+# Run joint Gibbs sampling over (alm, C_l) -- Blocks 1-2 only (no phi block)
+samples, logp, accepts, final_step_size = run_gibbs_chain(
     model,
-    num_samples=500,
+    n_samples=500,
     alm_sampler='hmc',
-    alm_step_size=0.01,
-    alm_n_lfs=10,
+    hmc_step_size=0.01,
+    n_lfs=10,
 )
+# `samples` is (n_samples, len(model.x0)): each row packs [ln C_l, real alm, imag alm]
+# per the parameter vector layout described in the module docstrings / CLAUDE.md.
 ```
 
 ## Running Tests

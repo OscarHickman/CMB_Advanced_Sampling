@@ -1168,3 +1168,61 @@ def test_gibbs_chain_phi_rescale_move_zero_scale_matches_move_off(small_model):
     )
     np.testing.assert_allclose(on[1], off[1], rtol=0, atol=0)
     np.testing.assert_allclose(on[5], off[5], rtol=0, atol=0)
+
+
+@skip_no_tfp
+def test_gibbs_chain_seed_is_immune_to_prior_global_tf_rng_state(small_model):
+    """`seed=` must fully determine a Gibbs chain, including the HMC blocks.
+
+    Regression test for a real bug (2026-08-31): run_gibbs_chain seeded only
+    its numpy stream (Block 1, Block 4, mass-matrix probes). The HMC/NUTS
+    `one_step` calls take no `seed=`, so TFP drew momenta and Metropolis
+    uniforms from TensorFlow's process-global RNG. A nominally seeded chain
+    therefore depended on how many TF random ops had run earlier in the same
+    process: consuming 5 tf.random.normal draws first moved the recovered
+    C_L^phiphi by 5x (4.12e-7 -> 8.32e-8). That is what made
+    test_gibbs_chain_sample_cl_phiphi_recovers_known_spectrum pass in
+    isolation and fail in a full-suite run -- it was never flaky, it was
+    reading an unseeded stream.
+
+    Asserting bit-identity (atol=rtol=0) rather than closeness: the whole
+    point is that the seed leaves nothing to chance.
+    """
+    import tensorflow as tf
+
+    from diffcmb import run_gibbs_chain
+    from diffcmb.samplers import _alm_index_lm
+
+    lmax = small_model.lmax
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    C0 = 1e-6
+    cl_phiphi_full = np.full(lmax, C0, dtype=np.float64)
+
+    L_arr, m_arr = _alm_index_lm(lmax, n_real, n_imag)
+    var = np.empty(n_real + n_imag)
+    real_idx = np.arange(n_real)
+    var[real_idx] = np.where(m_arr[real_idx] == 0, C0, C0 / 2.0)
+    var[n_real:] = C0 / 2.0
+    phi_initial = np.random.default_rng(99).normal(scale=np.sqrt(var))
+
+    kwargs = {
+        "n_samples": 8, "n_burnin": 4, "hmc_step_size": 0.01, "n_lfs": 5,
+        "cl_phiphi_full": cl_phiphi_full, "phi_initial": phi_initial,
+        "phi_hmc_step_size": 0.01, "phi_n_lfs": 5, "sample_cl_phiphi": True,
+        "seed": 7,
+    }
+
+    first = run_gibbs_chain(small_model, **kwargs)
+    # Advance TF's global RNG stream, exactly as an unrelated earlier test
+    # (or any earlier TF op) would.
+    for _ in range(5):
+        tf.random.normal([1000])
+    second = run_gibbs_chain(small_model, **kwargs)
+
+    # alm samples, phi samples and the Block 4 spectrum must all match exactly.
+    for idx, name in ((0, "alm"), (1, "phi"), (5, "cl_phiphi")):
+        np.testing.assert_allclose(
+            first[idx], second[idx], rtol=0, atol=0,
+            err_msg=f"{name} samples differ => seed does not control the HMC blocks",
+        )

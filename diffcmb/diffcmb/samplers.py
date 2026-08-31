@@ -1117,6 +1117,20 @@ def run_gibbs_chain(
     # approximation being tested for bias, not a claimed-correct sampler.
 
     rng = np.random.default_rng(seed)
+    # `rng` covers only the numpy-side draws (Block 1, Block 4, mass-matrix
+    # probes, CG/messenger noise). The HMC/NUTS blocks get their momenta and
+    # Metropolis uniforms from TFP, and none of the `one_step` calls below
+    # pass a `seed=`, so without this they draw from TensorFlow's PROCESS-
+    # GLOBAL RNG stream -- making a nominally seeded chain depend on however
+    # many TF random ops happened to run earlier in the same process.
+    # Measured directly: consuming 5 tf.random.normal draws before an
+    # otherwise identical seed=7 chain moved the recovered C_L^phiphi by 5x
+    # (4.12e-7 -> 8.32e-8), which is what made
+    # tests/test_samplers.py::test_gibbs_chain_sample_cl_phiphi_recovers_known_spectrum
+    # pass alone and fail in a full-suite run. Seeding the global stream here
+    # makes `seed` mean what it claims for both halves of the sampler.
+    if seed is not None and tf is not None:
+        tf.random.set_seed(seed)
     lmax = model.lmax
     n_lncl = lmax - 2
     n_real = lmax * (lmax + 1) // 2 - 3

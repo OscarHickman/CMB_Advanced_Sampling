@@ -1189,3 +1189,81 @@ def test_sample_cl_phiphi_given_phi_rejects_non_finite_input():
     phi_packed[0] = np.nan
     with pytest.raises(ValueError):
         sample_cl_phiphi_given_phi(phi_packed, lmax)
+
+
+# ---------------------------------------------------------------------------
+# 10 — Block 4 makes the phi prior scale-free (root cause of job 11887897)
+# ---------------------------------------------------------------------------
+
+def test_block4_refitted_prior_is_scale_free_in_phi_amplitude():
+    """With Block 4 on, the phi Gaussian prior exerts NO restoring force on the
+    overall amplitude of phi -- it is exactly constant along the scaling ray.
+
+    Block 4 draws C_L^phiphi | phi ~ InvGamma(L-0.5, S_L/2), whose mean is
+    S_L/(2(L-1.5)). Substituting that back into log_prob_phi_block's prior term:
+
+        0.5 * sum_L S_L / C_L = 0.5 * sum_L S_L * 2(L-1.5)/S_L = sum_L (L-1.5)
+
+    which does not depend on phi at all. This is the phi-side face of the flat,
+    improper implied prior that coverage_ensemble_chain.py's header documents,
+    and it is the reason the sampler cannot pull an inflated phi back down:
+    the ONLY thing pinning the amplitude is the lensing likelihood.
+
+    Regression guard for the 2026-08-28 coverage-ensemble failure (job
+    11887897), where a cold alm start shifted the likelihood's preferred phi
+    amplitude by ~30x and the prior offered no opposition, leaving phi frozen
+    ~7e4x above truth in power. Anyone tempted to assume "the prior will
+    regularise the amplitude" should read this test.
+    """
+    from diffcmb.lensing import compute_sl_phi_np
+
+    lmax = 12
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    rng = np.random.default_rng(11887897)
+    phi_packed = rng.normal(size=n_real + n_imag)
+
+    def block4_prior_term(phi):
+        """0.5 * sum_L S_L / C_L with C_L at Block 4's conditional mean."""
+        S = compute_sl_phi_np(phi, lmax)
+        total = 0.0
+        for L in range(2, lmax):
+            cl = S[L] / (2.0 * (L - 1.5))
+            total += 0.5 * S[L] / cl
+        return total
+
+    expected = sum(L - 1.5 for L in range(2, lmax))
+    base = block4_prior_term(phi_packed)
+    assert base == pytest.approx(expected, rel=1e-12)
+
+    # The whole point: rescaling phi over four orders of magnitude does not
+    # change the prior term by even one part in 1e-10.
+    for s in (1e-2, 0.1, 1.0, 10.0, 1e2):
+        assert block4_prior_term(s * phi_packed) == pytest.approx(base, rel=1e-10)
+
+
+def test_block4_fixed_spectrum_prior_DOES_constrain_amplitude():
+    """Contrast case: with C_L^phiphi held FIXED (Block 4 off), the same prior
+    term scales as s^2 and does pin the amplitude.
+
+    Together with the test above this isolates exactly what enabling Block 4
+    gives up, so the trade-off is explicit rather than folklore.
+    """
+    from diffcmb.lensing import compute_sl_phi_np
+
+    lmax = 12
+    n_real = lmax * (lmax + 1) // 2 - 3
+    n_imag = (lmax - 2) * (lmax - 1) // 2
+    rng = np.random.default_rng(0)
+    phi_packed = rng.normal(size=n_real + n_imag)
+    cl_fixed = np.full(lmax, 1.0)
+
+    def fixed_prior_term(phi):
+        S = compute_sl_phi_np(phi, lmax)
+        return 0.5 * sum(S[L] / cl_fixed[L] for L in range(2, lmax))
+
+    base = fixed_prior_term(phi_packed)
+    for s in (0.5, 2.0, 10.0):
+        assert fixed_prior_term(s * phi_packed) == pytest.approx(
+            s * s * base, rel=1e-10
+        )

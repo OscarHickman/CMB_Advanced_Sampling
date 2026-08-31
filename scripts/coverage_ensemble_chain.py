@@ -56,6 +56,7 @@ import tensorflow as tf
 from diffcmb import CosmologyAdvancedSampling, run_gibbs_chain
 from diffcmb.lensing import _alm_hp_to_packed, lens_map_tf
 from diffcmb.power import call_CAMB_map
+from diffcmb.samplers import find_map_estimate
 
 LCDM_PARAMS = [67.74, 0.0486, 0.2589, 0.06, 0.0, 0.066]
 
@@ -107,7 +108,17 @@ def main():
     p.add_argument("--lmax", type=int, default=128)
     p.add_argument("--nside", type=int, default=128)
     p.add_argument("--noisesig", type=float, default=1.0)
-    p.add_argument("--n_burnin", type=int, default=100)
+    # 2000 steps at lr=0.01 are the validated production MAP settings, copied
+    # from pilot_coverage_equilibration.py so the ensemble and the gate that
+    # clears it run the SAME initialisation. map_steps=0 reproduces the old
+    # (broken) cold start and is kept only for deliberate A/B testing.
+    p.add_argument("--map_steps", type=int, default=2000,
+                   help="Adam steps for the data-driven MAP alm start; 0 falls "
+                        "back to the cold prior draw that broke job 11887897")
+    p.add_argument("--map_lr", type=float, default=0.01)
+    # Matches the pilot's burn-in. The original 100 was never gated: the gate
+    # ran on the pilot, which burns in 400 sweeps from a MAP start.
+    p.add_argument("--n_burnin", type=int, default=400)
     p.add_argument("--n_samples", type=int, default=600)
     p.add_argument("--hmc_step_size", type=float, default=0.01)
     p.add_argument("--n_lfs", type=int, default=10)
@@ -180,7 +191,47 @@ def main():
     )
     print(f"  start-vs-truth phi cosine similarity={start_corr:+.4f} (~0 expected)")
 
-    x0 = np.concatenate([np.log(cl_true[2:lmax]), alm_start_packed])
+    # --- alm start: the data-driven MAP, not the cold prior draw ---
+    # MUST come after the data is installed on the model above, since psi (and
+    # hence the MAP) depends on it. find_map_estimate ignores alm_start_packed
+    # and descends from model.prior_parameters_tf() using the data alone, so
+    # the truth never enters.
+    #
+    # !! This mirrors pilot_coverage_equilibration.py deliberately, and is NOT
+    # optional. Omitting it is what broke the first coverage ensemble (job
+    # 11887897, 2026-08-28): a cold prior-draw alm leaves a residual the phi
+    # block absorbs by inflating phi ~30x in amplitude, and with Block 4 on the
+    # refitted C_L^phiphi makes the phi prior EXACTLY scale-free (constant
+    # sum_L (L-1.5); see test_block4_refitted_prior_is_scale_free_in_phi_amplitude)
+    # so nothing pulls it back. Every realization froze 1e3-1e5x above the true
+    # phi power and ranked 0/8 in every ell-bin. The same failure had already
+    # been seen once, in job 11663105 (2026-07-30), which is why the pilot
+    # carries the MAP start -- the ensemble script simply never inherited it,
+    # so the equilibration gate and the production script were not running the
+    # same pipeline.
+    if args.map_steps > 0:
+        t_map = time.time()
+        x0 = np.asarray(
+            find_map_estimate(model, n_steps=args.map_steps,
+                              learning_rate=args.map_lr),
+            dtype=np.float64,
+        )
+        print(f"  MAP alm start found in {time.time() - t_map:.1f}s")
+        map_alm = x0[lmax - 2:]
+        map_corr = float(
+            np.dot(map_alm, alm_true_packed)
+            / (np.linalg.norm(map_alm) * np.linalg.norm(alm_true_packed))
+        )
+        # Unlike the phi cosine similarity this one SHOULD be well above zero:
+        # the MAP is data-driven and the data contain the truth. Not a leak --
+        # reported so "informed by data" vs "initialised at truth" stays
+        # auditable, and because a near-zero value here predicts the failure.
+        print(f"  MAP-vs-truth alm cosine similarity={map_corr:+.4f} "
+              f"(expected >0: data-driven, not truth-initialised)")
+    else:
+        print("  ! map_steps=0: cold prior-draw alm start -- this is the "
+              "configuration that broke jobs 11663105 and 11887897")
+        x0 = np.concatenate([np.log(cl_true[2:lmax]), alm_start_packed])
 
     t0 = time.time()
     # run_gibbs_chain's return arity depends on which blocks are enabled: a
@@ -223,6 +274,25 @@ def main():
     if not all(np.all(np.isfinite(a)) for a in finite_checks):
         raise RuntimeError(f"realization {r}: NaN/Inf in samples")
 
+    # --- calibration sanity check: computed here, RAISED AFTER THE SAVE ---
+    # Job 11887897 wrote 12 finite, well-formed, completely wrong chains: phi
+    # frozen 1.9e3-2.5e5x above the true power, and nothing downstream noticed
+    # until the aggregate rank test ran. Finiteness is not calibration. This
+    # compares the chain's phi power against the truth it was generated from
+    # and fails LOUDLY rather than saving a plausible-looking corpse.
+    #
+    # The threshold is deliberately loose (100x). A correct-but-slowly-mixing
+    # chain lands within a factor of a few (measured: 0.09-2.5 across every
+    # lmax=64 pilot); the failure mode this guards against is 1e3-1e5. Anything
+    # in between is genuinely ambiguous and worth a human look, which is what
+    # the error message asks for.
+    phi_power_chain = float(np.mean(phi_samples[len(phi_samples) // 2:] ** 2))
+    phi_power_truth = float(np.mean(phi_true_packed ** 2))
+    ratio = phi_power_chain / max(phi_power_truth, 1e-300)
+    print(f"  phi power vs truth: chain={phi_power_chain:.4e} "
+          f"truth={phi_power_truth:.4e} ratio={ratio:.3e}")
+    phi_calibration_ok = 1e-2 < ratio < 1e2
+
     save_kwargs = {
         "realization": r, "lmax": lmax, "nside": nside,
         "alm_samples": samples, "phi_samples": phi_samples,
@@ -236,6 +306,9 @@ def main():
         "sample_cl_phiphi": sample_cl_phiphi,
         "seconds_total": elapsed,
         "seconds_per_sweep": elapsed / max(1, len(samples)),
+        "map_steps": args.map_steps,
+        "phi_power_ratio_to_truth": ratio,
+        "phi_calibration_ok": phi_calibration_ok,
     }
     # Omit the key entirely (rather than storing None) when Block 4 is off, so
     # the aggregator's `"cl_phiphi_samples" in npz.files` check stays truthful
@@ -244,6 +317,23 @@ def main():
         save_kwargs["cl_phiphi_samples"] = cl_phiphi_samples
     np.savez(out, **save_kwargs)
     print(f"Saved realization {r} to {out}")
+
+    # Raised only AFTER the save: the chain is hours of compute and is the
+    # primary evidence for diagnosing whatever went wrong, so it is preserved
+    # and the flag stored alongside it. The raise is what makes SLURM report
+    # FAILED, so a broken configuration cannot quietly produce a full
+    # directory of plausible-looking output the way job 11887897 did.
+    if not phi_calibration_ok:
+        raise RuntimeError(
+            f"realization {r}: phi power is {ratio:.3e}x the truth (expected "
+            f"O(1); every healthy lmax=64 pilot lands in 0.09-2.5). This is "
+            f"the job-11887897 failure signature. First check the "
+            f"MAP-vs-truth alm cosine similarity printed above: if it is near "
+            f"zero, the alm block cold-started and phi inflated to absorb the "
+            f"residual -- which Block 4's scale-free prior cannot correct "
+            f"(ROADMAP.md item 7, achievements.md). Chain WAS saved to {out} "
+            f"for diagnosis; do not aggregate it."
+        )
 
 
 if __name__ == "__main__":

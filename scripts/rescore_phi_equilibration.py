@@ -64,9 +64,11 @@ def tau_int_geyer(r):
         gammas.append(g)
     if not gammas:
         return 1.0, True
-    # Truncated before running out of lags => the sum is a lower bound only.
+    # Ran out of lags without ever finding a non-positive pair => the
+    # autocorrelation hadn't decayed within the window, so the sum is a lower
+    # bound only, not a converged estimate.
     truncated_early = len(gammas) < len(r) // 2
-    return max(1.0, 2.0 * sum(gammas) - 1.0), not truncated_early
+    return max(1.0, 2.0 * sum(gammas) - 1.0), truncated_early
 
 
 def split_rhat(x):
