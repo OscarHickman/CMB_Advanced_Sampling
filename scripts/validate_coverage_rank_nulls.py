@@ -5,9 +5,17 @@ rank distribution is non-uniform. For the *spectrum* rows (C_l^TT, C_L^phiphi)
 that flag fires even for a perfect sampler, because the statistic ranks the
 truth against its own conditional's MODE:
 
-    Blocks 1 and 4 both draw   C ~ InvGamma(alpha = L - 0.5, beta = S_L / 2)
-    whose mode is             beta/(alpha+1) = S_L / (2L+1)
-    which is exactly          aggregate_coverage_ranks.realized_spectrum(S)
+    Blocks 1 and 4 both draw   C ~ InvGamma(alpha = k_L/2 + a0, beta = (S_L + b0_L)/2)
+    whose mode under the flat  beta/(alpha+1) = S_L / k_L
+    prior (a0 = -1, b0 = 0) is
+    which is exactly           aggregate_coverage_ranks.realized_spectrum(S)
+
+    k_L = 2L is the PACKED real dof (splittosingularalm forces Im(a_{L,1}) = 0).
+    Until 2026-08-31 this script hardcoded alpha = L - 0.5 (i.e. k_L = 2L+1) in
+    all three checks while the sampler had already been fixed to derive alpha
+    from the packing, so its null band and its Block-4 CDF were computed from
+    the wrong distribution. Both now read the shape AND the prior off the saved
+    chain, so the null tracks the configuration it is validating.
 
 InvGamma is right-skewed, so P(draw < mode) < 0.5 by construction, and
 bin-averaging over l shrinks the spread while leaving the offset -- driving
@@ -25,8 +33,9 @@ It runs three checks:
      and makes a correct sampler look biased.
   3. BLOCK 4 EXACTNESS, directly on production chains. Using the saved
      per-sweep (phi_samples, cl_phiphi_samples) pairs,
-     u = CDF_InvGamma(L-0.5, S_L(phi_i)/2)[C_{L,i}] must be Uniform(0,1).
-     A lag-1 misalignment is run as a control so a pass can't be vacuous.
+     u = CDF_InvGamma(k_L/2+a0, (S_L(phi_i)+b0_L)/2)[C_{L,i}] must be
+     Uniform(0,1). A lag-1 misalignment is run as a control so a pass can't
+     be vacuous.
 
 Usage:
   PYTHONPATH=diffcmb .venv/bin/python scripts/validate_coverage_rank_nulls.py \
@@ -41,9 +50,35 @@ from aggregate_coverage_ranks import _sl_from_packed, realized_spectrum
 from scipy import stats
 from scipy.special import gammaincc
 
+from diffcmb.alm_utils import invgamma_shape_for_spectrum
 from diffcmb.lensing import compute_sl_phi_np
 
 BINS = [(2, 10), (10, 30), (30, 60), (60, 64)]
+
+
+def prior_of(d, tag):
+    """(a0, b0_vec) of the InvGamma prior the run actually used, from the chain.
+
+    Block 1 (C_l^TT) is always the flat improper default, a0 = -1, b0 = 0.
+    Block 4 (C_L^phiphi) is flat too unless the run set --cl_phiphi_prior_nu,
+    in which case the proper conjugate prior is InvGamma(nu/2, nu*C_L^fid/2)
+    and BOTH the shape and the rate pick up a prior term. Read from the saved
+    chain rather than assumed, so this script cannot silently drift from the
+    configuration it is validating (as it did before 2026-08-31, when it
+    hardcoded alpha = L - 0.5 for every run).
+    """
+    lmax = int(d["lmax"])
+    if tag == "cl_phiphi":
+        nu = float(d["cl_phiphi_prior_nu"]) if "cl_phiphi_prior_nu" in d.files else 0.0
+        if np.isfinite(nu) and nu > 0.0:
+            return 0.5 * nu, nu * np.asarray(d["cl_phiphi_fid"], dtype=np.float64)[:lmax]
+    return -1.0, np.zeros(lmax, dtype=np.float64)
+
+
+def alpha_of(d, tag):
+    """Per-multipole InvGamma shape the run's conditional actually used."""
+    a0, _ = prior_of(d, tag)
+    return invgamma_shape_for_spectrum(int(d["lmax"]), a0=a0)
 
 
 def load(indir):
@@ -68,7 +103,8 @@ def null_frozen(files, tag, n_eff, n_rep, rng):
         lmax = int(d["lmax"])
         S = (_sl_from_packed(d["alm_true_packed"], lmax) if tag == "cl_TT"
              else compute_sl_phi_np(d["phi_true_packed"], lmax))
-        per_real.append((S, lmax))
+        _a0, b0 = prior_of(d, tag)
+        per_real.append((S, lmax, alpha_of(d, tag), b0))
 
     print(f"\n--- NULL [{tag}]: conditioning field FROZEN at truth ---")
     print(f"  {'bin':12s} {'null_mean':>10s} {'2.5%':>9s} {'97.5%':>9s}")
@@ -76,11 +112,11 @@ def null_frozen(files, tag, n_eff, n_rep, rng):
         means = np.empty(n_rep)
         for r in range(n_rep):
             us = []
-            for S, lmax in per_real:
+            for S, lmax, alpha, b0 in per_real:
                 ells = np.arange(max(2, lo), min(lmax, hi))
-                beta = S[ells] / 2.0
+                beta = (S[ells] + b0[ells]) / 2.0
                 draws = beta[None, :] / rng.gamma(
-                    (ells - 0.5)[None, :], 1.0, size=(n_eff, len(ells))
+                    alpha[ells][None, :], 1.0, size=(n_eff, len(ells))
                 )
                 us.append(_rank_u(draws.mean(axis=1),
                                   realized_spectrum(S, lmax)[ells].mean(), n_eff))
@@ -97,7 +133,9 @@ def null_with_phi_trajectory(files, thin, n_rep, rng):
         lmax = int(d["lmax"])
         S_chain = np.array([compute_sl_phi_np(p, lmax)
                             for p in d["phi_samples"][::thin]])
-        per_real.append((S_chain, compute_sl_phi_np(d["phi_true_packed"], lmax), lmax))
+        _a0, b0 = prior_of(d, "cl_phiphi")
+        per_real.append((S_chain, compute_sl_phi_np(d["phi_true_packed"], lmax),
+                         lmax, alpha_of(d, "cl_phiphi"), b0))
     n_eff = per_real[0][0].shape[0]
 
     print(f"\n--- NULL [cl_phiphi]: using the chain's OWN phi trajectory "
@@ -107,10 +145,10 @@ def null_with_phi_trajectory(files, thin, n_rep, rng):
         means = np.empty(n_rep)
         for r in range(n_rep):
             us = []
-            for S_chain, S_true, lmax in per_real:
+            for S_chain, S_true, lmax, alpha, b0 in per_real:
                 ells = np.arange(max(2, lo), min(lmax, hi))
-                beta = S_chain[:, ells] / 2.0
-                draws = beta / rng.gamma((ells - 0.5)[None, :], 1.0, size=beta.shape)
+                beta = (S_chain[:, ells] + b0[ells][None, :]) / 2.0
+                draws = beta / rng.gamma(alpha[ells][None, :], 1.0, size=beta.shape)
                 us.append(_rank_u(draws.mean(axis=1),
                                   realized_spectrum(S_true, lmax)[ells].mean(), n_eff))
             means[r] = np.mean(us)
@@ -119,9 +157,19 @@ def null_with_phi_trajectory(files, thin, n_rep, rng):
 
 
 def block4_exactness(files, stride):
-    """Is Block 4 drawing from InvGamma(L-0.5, S_L(phi)/2) given its own phi?"""
+    """Is Block 4 drawing from its own exact conditional given its own phi?
+
+    The conditional is InvGamma(k_L/2 + a0, (S_L(phi) + b0_L)/2) with k_L = 2L
+    the packed dof and (a0, b0) the run's prior -- flat (-1, 0) by default, or
+    (nu/2, nu*C_L^fid) when --cl_phiphi_prior_nu was set. Both are read from
+    the chain, so this check follows whatever configuration produced it.
+    """
     print("\n--- BLOCK 4 EXACTNESS on production chains ---")
-    print("  u = CDF_InvGamma(L-0.5, S_L(phi_i)/2)[C_{L,i}]; uniform if exact.")
+    print("  u = CDF_InvGamma(k_L/2+a0, (S_L(phi_i)+b0_L)/2)[C_{L,i}]; "
+          "uniform if exact.")
+    if not all("cl_phiphi_samples" in np.load(f).files for f in files):
+        print("  (Block 4 disabled in these chains -- nothing to check; skipped)")
+        return
     for lag, label in ((0, "aligned"), (1, "lag-1 (control, should FAIL)")):
         allu = []
         for f in files:
@@ -131,13 +179,61 @@ def block4_exactness(files, stride):
             if lag:
                 phi, lnC = phi[:-1], lnC[1:]
             ells = np.arange(2, lmax)
+            alpha = alpha_of(d, "cl_phiphi")[ells]
+            _a0, b0 = prior_of(d, "cl_phiphi")
             for i in range(0, len(phi), stride):
                 S = compute_sl_phi_np(phi[i], lmax)[ells]
-                allu.append(gammaincc(ells - 0.5, (S / 2.0) / np.exp(lnC[i])))
+                beta = (S + b0[ells]) / 2.0
+                allu.append(gammaincc(alpha, beta / np.exp(lnC[i])))
         u = np.concatenate(allu)
         ks = stats.kstest(u, "uniform")
         print(f"  {label:30s} N={u.size:6d}  mean_u={u.mean():.4f}  "
               f"KS_D={ks.statistic:.4f}  KS_p={ks.pvalue:.3g}")
+
+
+def strict_clpp_sbc(files, thin):
+    """STRICT SBC rank of C_L^phiphi_true among the Block 4 samples.
+
+    Only defined when the run used a PROPER prior (--cl_phiphi_prior_nu), because
+    only then was the truth drawn from the same joint prior the sampler targets
+    (coverage_ensemble_chain.py draws C_L ~ InvGamma, then phi ~ N(0,C_L)). Under
+    a correct sampler this rank is uniform -- no null simulation needed, unlike
+    the aggregator's C_L^phiphi row, which ranks against the REALIZED power of
+    phi_true and is therefore coverage only.
+
+    This is the statistic that exposed the 2026-08-31 inverse-Gamma dof bug
+    (mean_u = 0.25-0.28, KS_p = 0.0000 with alpha = L - 0.5), and it is the
+    decisive check that the corrected alpha = k_L/2 + a0 fixed it.
+    """
+    print("\n--- STRICT C_L^phiphi SBC rank (truth drawn from the sampler's own "
+          "prior) ---")
+    d0 = np.load(files[0])
+    nu = float(d0["cl_phiphi_prior_nu"]) if "cl_phiphi_prior_nu" in d0.files else 0.0
+    if "cl_phiphi_samples" not in d0.files or not (np.isfinite(nu) and nu > 0.0):
+        print("  (needs Block 4 ON with --cl_phiphi_prior_nu; skipped)")
+        return
+    print(f"  prior nu={nu:g}; uniform under a correct sampler, no null needed.")
+    print(f"  {'bin':12s} {'N':>4s} {'mean_u':>8s} {'KS_p':>8s}   ranks")
+    allu = []
+    for lo, hi in BINS:
+        us, ranks = [], []
+        for f in files:
+            d = np.load(f)
+            lmax = int(d["lmax"])
+            ells = np.arange(max(2, lo), min(lmax, hi))
+            # cl_phiphi_samples is stored as log C_L for l=2..lmax-1.
+            post = np.exp(d["cl_phiphi_samples"][::thin])[:, ells - 2].mean(axis=1)
+            tru = np.asarray(d["cl_phiphi_true"], dtype=np.float64)[ells].mean()
+            ranks.append(int(np.sum(post < tru)))
+            us.append((ranks[-1] + 0.5) / (len(post) + 1.0))
+        allu.extend(us)
+        ks = stats.kstest(np.asarray(us), "uniform").pvalue if len(us) >= 5 else np.nan
+        flag = "  <-- FLAG" if ks < 0.01 else ""
+        print(f"  [{lo:3d},{hi:3d})  {len(us):4d} {np.mean(us):8.4f} {ks:8.4f}   "
+              f"{' '.join(str(r) for r in ranks)}{flag}")
+    u = np.asarray(allu)
+    print(f"  POOLED: N={u.size}  mean_u={u.mean():.4f}  "
+          f"KS_p={stats.kstest(u, 'uniform').pvalue:.4g}")
 
 
 def phi_power_bias(files, stride):
@@ -182,6 +278,7 @@ def main():
         null_frozen(files, tag, n_eff, args.n_rep, rng)
     null_with_phi_trajectory(files, args.thin, args.n_rep, rng)
     block4_exactness(files, args.stride)
+    strict_clpp_sbc(files, args.thin)
     phi_power_bias(files, args.stride)
 
     print("\nCompare each observed mean_u from aggregate_coverage_ranks.py against\n"

@@ -20,9 +20,10 @@ proof of a sampler bug.
 
 Spectrum-level "ranks" (C_l, C_L^phiphi): these are interval-coverage checks
 against the *realized* power in the truth field, NOT strict SBC ranks. Block 1's
-exact conditional C_l|alm ~ InvGamma(l-0.5, S_l/2) is exactly the C_l likelihood
-(both go as C_l^{-l-0.5} exp(-S_l/2C_l)), i.e. the implied prior on C_l is flat
-and improper; the same holds for Block 4. An improper prior cannot be sampled,
+exact conditional C_l|alm ~ InvGamma(k_l/2 - 1, S_l/2), with k_l = 2l the PACKED
+real dof, is exactly the C_l likelihood (both go as C_l^{-k_l/2} exp(-S_l/2C_l)),
+i.e. the implied prior on C_l is flat and improper; the same holds for Block 4
+unless --cl_phiphi_prior_nu puts a proper conjugate prior on it. An improper prior cannot be sampled,
 so no C_l_true ~ p(C_l) exists to rank. Comparing against realized rather than
 ensemble-average power is also what avoids the cosmic-variance bug recorded in
 achievements.md. Label these as coverage, not calibration, in any figure.
@@ -42,6 +43,7 @@ import os
 
 import numpy as np
 
+from diffcmb.alm_utils import packed_dof_per_multipole
 from diffcmb.lensing import compute_sl_phi_np
 from diffcmb.samplers import _alm_index_lm
 
@@ -86,10 +88,23 @@ def rank_of(truth_scalar, posterior_scalars):
 
 
 def realized_spectrum(S, lmax):
-    """S_l -> C_l = S_l / (2l+1) for l=2..lmax-1, zero below."""
+    """S_l -> realized C_l = S_l / k_l for l=2..lmax-1, zero below.
+
+    k_l is the PACKED real dof at l (2l, not 2l+1 -- splittosingularalm forces
+    Im(a_{l,1}) = 0), so this is both the ML estimate of C_l given
+    S_l | C_l ~ C_l * chi^2_{k_l} and, under the flat improper prior
+    (a0 = -1), exactly the mode beta/(alpha+1) = (S_l/2)/(k_l/2) of the
+    conditional that Blocks 1 and 4 draw from.
+
+    Corrected 2026-08-31 alongside the InvGamma shape fix: this divided by
+    2l+1 while the sampler had already moved to k_l = 2l, which biased the
+    coverage reference high by (2l+1)/2l and drove the C_l^TT / C_L^phiphi
+    rank rows further toward 0 than the statistic's own null accounts for.
+    """
+    k = packed_dof_per_multipole(lmax)
     cl = np.zeros(lmax, dtype=np.float64)
     for ell in range(2, lmax):
-        cl[ell] = S[ell] / (2 * ell + 1)
+        cl[ell] = S[ell] / k[ell]
     return cl
 
 
