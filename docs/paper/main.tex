@@ -221,9 +221,9 @@ Equation~\eqref{eq:block4} is otherwise the conditional implied by a
 \emph{flat} prior on $\clpp$, which is improper. This is worth stating explicitly rather than
 leaving implicit, because it propagates into the $\phi$ block in a way that is
 easy to miss. Integrating $\clpp$ out of the joint gives a marginal on the
-field, $p(\phi) \propto S_L^{-(L-1/2)}$; against the radial measure for the
-$2L+1$ real components of $\phi_{Lm}$, $r^{2L}\,\mathrm{d}r$ with $S_L = r^2$,
-this is
+field, $p(\phi) \propto S_L^{-(k_L/2 - 1)} = S_L^{-(L-1)}$; against the radial
+measure for the $k_L = 2L$ real components of $\phi_{Lm}$,
+$r^{\,k_L - 1}\,\mathrm{d}r$ with $S_L = r^2$, this is
 \begin{equation}
   p(r) \;\propto\; r^{\,1} ,
 \end{equation}
@@ -231,7 +231,7 @@ i.e.\ flat in $S_L$ --- improper, and \emph{increasing} with amplitude. The
 $\phi$ amplitude is therefore constrained by the lensing likelihood alone, with
 no prior restoring force. Equivalently, substituting the conditional mean of
 Eq.~\eqref{eq:block4} into the Gaussian $\phi$ prior term gives
-$\tfrac12 \sum_L S_L/\clpp = \sum_L (L - 3/2)$, independent of $\phi$: the
+$\tfrac12 \sum_L S_L/\clpp = \sum_L (L - 2)$, independent of $\phi$: the
 prior is exactly scale-free along the amplitude ray.
 
 In practice this is benign whenever the lensing signal-to-noise is sufficient
@@ -291,11 +291,16 @@ CMB-only simulations.
 (iv)~\textit{Lensing-operator accuracy}: the matrix-free SHT forward model is
 validated against the dense reference and independent \texttt{healpy} outputs to
 numerical precision, following the standard set by \citet{Reinecke:2023}.
-The residual $\phi$-amplitude deficit observed at finite chain length
-(\S\ref{sec:results}) is consistent with an under-mixed / Wiener-suppressed
-chain start \citep{Millea:2020}; it decreases monotonically with signal-to-noise
-ratio ($\rho = -0.78$ across 27 multipole bins), which is the expected signature
-of a sampler that has not yet equilibrated from a Wiener-filtered starting point.
+(v)~\textit{Chain initialisation}: an earlier version of these ensembles began
+the $\alm$ block from a cold prior draw rather than the data-driven warm start,
+and the $\phi$ amplitude then ran away by orders of magnitude, since with a
+resampled $\clpp$ nothing in the target restrains it (Sec.~\ref{sec:clpp-prior})
+and $\phi$ is the only freedom left to absorb the $\alm$ residual. The effect
+was diagnostic rather than subtle --- across realizations the $\phi$ inflation
+correlated with the $\alm$ misfit at $\rho = \placeholder{-0.78}$
+($p = \placeholder{0.003}$) --- and all results reported here use the warm
+start, with $\phi$ power within a factor $\placeholder{0.8\text{--}1.4}$ of the
+truth in every chain.
 
 
 % ============================================================
@@ -315,9 +320,9 @@ binned power within each posterior.
 
 The spectrum-level statistic must be calibrated before any departure from
 uniformity is read as bias, and this is not a technicality. Ranking the truth's
-\emph{realized} power $S_L/(2L+1)$ against posterior draws of $\clpp$ compares
+\emph{realized} power $S_L/k_L$ against posterior draws of $\clpp$ compares
 it against the \emph{mode} of Eq.~\eqref{eq:block4}, since
-$\beta/(\alpha+1) = S_L/(2L+1)$. The inverse-Gamma is right-skewed, so
+$\beta/(\alpha+1) = S_L/k_L$. The inverse-Gamma is right-skewed, so
 $P(\text{draw} < \text{mode}) < 1/2$ \emph{for an exact sampler}, and averaging
 over $\ell$ within a bin shrinks the spread while preserving the offset, driving
 the mean rank toward zero. A naive uniformity test therefore rejects a correct
@@ -325,23 +330,31 @@ sampler with arbitrarily high confidence at large bin width.
 
 We accordingly compare each observed rank against a null simulated from the
 conditional itself. For $\cl^{TT}$ the observed bin means
-$\placeholder{0.094, 0.104, 0.094, 0.375}$ agree with the simulated null
-$\placeholder{0.095, 0.095, 0.115, 0.345}$ in every bin. For $\clpp$ the null
+$\placeholder{0.083, 0.083, 0.094, 0.333}$ agree with the simulated null
+$\placeholder{0.086, 0.092, 0.114, 0.344}$ in every bin, each observation
+lying inside the null's $95\%$ band. For $\clpp$ the null
 must additionally retain the chain's own sweep-to-sweep scatter in $\phi$,
 which contributes a common-mode variance across $\ell$ that does not average
-down within a bin; with that included, the observed
-$\placeholder{0.281, 0.323, 0.323, 0.229}$ again lies within the null band
-throughout. We report these rows as interval coverage, not calibration, since
+down within a bin; a null that freezes $\phi$ at the truth is far too narrow
+and makes a correct sampler look biased. With that included, the observed
+$\placeholder{0.260, 0.302, 0.427, 0.406}$ again lies within the null band
+$\placeholder{0.279, 0.339, 0.457, 0.376}$ throughout. We report these rows as interval coverage, not calibration, since
 the implied $\cl$ prior is flat and improper and no strict rank exists.
 
 \subsubsection*{Block-level exactness}
 
 Independently of the rank test, we verify Block 4 directly on the production
 chains: using each sweep's $(\phi, \clpp)$ pair, the probability integral
-transform $u = F_{\mathrm{InvGamma}(L-1/2,\,S_L(\phi)/2)}(\clpp)$ is uniform
-(\placeholder{$\mathrm{KS}\ p = 0.53$}, \placeholder{$N = 17856$}), while a
-deliberately lag-shifted control is rejected --- confirming the test has power
-rather than merely failing to reject.
+transform $u = F_{\mathrm{InvGamma}(k_L/2 + a_0,\,(S_L(\phi)+b_{0,L})/2)}(\clpp)$
+is uniform (\placeholder{$\mathrm{KS}\ p = 0.42$}, \placeholder{$\bar u = 0.4999$},
+\placeholder{$N = 17856$}). We report the accompanying control rather than only
+the statistic: a deliberately lag-shifted pairing is rejected only when $\phi$
+mixes fast enough for $S_L(\phi_i) \ne S_L(\phi_{i+1})$ to bite
+(\placeholder{$p = 0.006$} in an earlier configuration), and in the
+proper-prior chains reported here it is \emph{not} rejected
+(\placeholder{$p = 0.18$}), so this particular pass carries no weight on its
+own. It is included for completeness, and the calibration evidence below rests
+on the independent generative ranks instead.
 
 \subsubsection*{Field-level calibration}
 
@@ -352,12 +365,17 @@ $\clpp$ held at the fiducial spectrum, so that the $\phi$ prior is proper and
 independent chains at $\lmax = \placeholder{64}$ over four multipole bins, the
 mean normalised ranks are
 \begin{equation*}
-  \bar u_{\phi} = \placeholder{0.453}\ (p = \placeholder{0.17}), \qquad
-  \bar u_{\alm} = \placeholder{0.537}\ (p = \placeholder{0.33}),
+  \bar u_{\phi} = \placeholder{0.4688}\ (p = \placeholder{0.124}), \qquad
+  \bar u_{\alm} = \placeholder{0.5312}\ (p = \placeholder{0.235}),
 \end{equation*}
-both consistent with uniformity, against $\bar u_\phi = \placeholder{0.367}$
+both consistent with uniformity and with no individual bin flagged in either
+field, against $\bar u_\phi = \placeholder{0.367}$
 ($p = \placeholder{0.004}$) for the same configuration with $\clpp$ resampled
-under the flat improper prior. \todo{Add rank histograms.}
+under the flat improper prior. These are measured against the corrected
+inverse-Gamma shape of Sec.~\ref{sec:clpp-prior}; the configuration is
+otherwise a single-variable change from the resampled-$\clpp$ run, so the
+difference is attributable to the $\clpp$ prior alone.
+\todo{Add rank histograms.}
 
 That the $\phi$ rank is uniform only once $\clpp$ is held fixed is itself
 informative, and is the reason we treat the prior of Sec.~\ref{sec:clpp-prior}
@@ -368,9 +386,26 @@ reason to be uniform: the departure is a statement about the prior, not
 evidence of a sampler defect. Adopting the proper conjugate prior of
 Eq.~\eqref{eq:block4-proper} and drawing the truth from that same joint prior
 restores a strict calibration test while retaining the $\clpp$ block that
-produces the joint posterior of Sec.~\ref{sec:joint-posterior}; this is the
-configuration we recommend for quoting $\clpp$ constraints.
-\todo{Report the proper-prior ensemble once re-run against the corrected shape parameter.}
+produces the joint posterior of Sec.~\ref{sec:joint-posterior}.
+
+We report the status of that configuration rather than assert it. Run with
+$\nu = \placeholder{6}$ at $\lmax = \placeholder{64}$, the strict rank of
+the true $\clpp$ --- drawn, uniquely in this configuration, from the same
+prior the sampler targets, so that no null simulation is required --- is
+$\bar u = \placeholder{0.3802}$ ($p = \placeholder{0.0013}$), against
+$\placeholder{0.25\text{--}0.28}$ ($p < 10^{-4}$) before the shape correction
+of Sec.~\ref{sec:clpp-prior}. The $\alm$ rank is clean
+($\placeholder{0.5052}$, $p = \placeholder{0.41}$) and Block~4 is exact given
+$\phi$, so the residual is localised to the $\phi$ block or its mixing under
+the funnel that resampling $\clpp$ induces: the same chains mix markedly worse
+than the fixed-$\clpp$ ensemble ($\tau_{\rm int}$ median
+$\placeholder{24\text{--}56}$ versus $\placeholder{4.7\text{--}27}$ per bin),
+and the deficit is not removed by discarding the first half or three quarters
+of each chain. We therefore quote the calibration claim from the fixed-$\clpp$
+configuration above, and present the $\clpp$ posterior of
+Sec.~\ref{sec:joint-posterior} as the posterior this sampler produces rather
+than as a calibration-validated one.
+\todo{Resolve with a longer-trajectory rerun; update if it moves to uniform.}
 
 \subsection{Joint $(\cl^{TT}, \clpp)$ posterior}
 \label{sec:joint-posterior}
@@ -381,6 +416,14 @@ chains, showing the cross-correlation between the two power spectra.
 This is the headline result: no existing method produces this joint object.
 Result: \todo{correlation amplitude and sign.}
 }
+
+This figure is sourced from the proper-prior configuration of
+Eq.~\eqref{eq:block4-proper}, which is the only one in which $\clpp$ is a
+proper Bayesian object (Sec.~\ref{sec:clpp-prior}). It therefore carries the
+caveat established in Sec.~\ref{sec:sbc}: that configuration's strict $\clpp$
+rank is $\placeholder{0.3802}$ ($p = \placeholder{0.0013}$), improved but not
+yet uniform, so the joint posterior is presented as the object this sampler
+produces and not as a calibration-validated one.
 
 \subsection{C$_\ell^{TT}$ bias vs lensing-blind analysis}
 \label{sec:cl-bias}
