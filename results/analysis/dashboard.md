@@ -1,5 +1,5 @@
 # Sampling & Validation Dashboard
-*Last updated: 2026-08-31*
+*Last updated: 2026-09-01*
 
 Live status of the production chains. Forward plan: `ROADMAP.md`. Closed-out
 results and the bug record: `achievements.md`.
@@ -42,7 +42,7 @@ strict `C_L^φφ` SBC rank does **not** clear:
 | Statistic | Result | Verdict |
 |---|---|---|
 | alm field rank | 0.5052 (KS_p 0.408) | clean |
-| Block 4 PIT given φ | 0.4999 (KS_p 0.42) | ⚠ **vacuous** — lag-1 control also passes (0.183) |
+| Block 4 PIT given φ | 0.4999 (KS_p 0.42) | **genuine pass** — lag-10/50 controls rejected at KS_p=0 (fixed 2026-09-01) |
 | φ field rank | 0.4115 (KS_p 0.0264) | low, worst bin `[10,30)` = 0.292 |
 | **strict `C_L^φφ` SBC rank** | **0.3802 (KS_p 0.0013)** | **improved from 0.25–0.28 pre-fix, still not uniform** |
 
@@ -52,7 +52,13 @@ power/truth median 1.08–1.14, concentrated in the same `[10,30)` bin. Not
 burn-in (0.400 on the 2nd half, 0.396 on the last quarter; φ power *rises*
 1.002 → 1.060 across the chain). Leading hypothesis is Block 3 mixing under the
 Block-4-ON funnel (τ_int max 92.7 vs 42.5, split-R̂ max 1.64 vs 1.31), not a
-wrong conditional. Any figure sourced from this job must carry the caveat.
+wrong conditional — and that hypothesis is now better supported than it was,
+because the Block 4 PIT's pass is no longer vacuous (see the row above). Any
+figure sourced from this job must carry the caveat.
+
+**Under test: job 11912088** (below) doubles the φ trajectory to test exactly
+this. Read it as: rank → 0.5 *with* τ_int falling ⇒ funnel non-convergence;
+rank stuck ≈0.38 *while* τ_int halves ⇒ the problem is Block 3 itself.
 
 ---
 
@@ -95,14 +101,31 @@ biased. `C_l^TT` needs no such correction because alm is pinned at cosine 0.9998
 
 ## In flight
 
-**Nothing in flight** as of 2026-08-31. Jobs 11903181 and 11903182 are both
-harvested (12/12 COMPLETED each, no tracebacks, φ/truth power ratios 0.77–1.39
-and 0.71–1.60).
+**Job 11912088** — Option 2 with a doubled φ trajectory (`phi_n_lfs` 240 → 480),
+launched 2026-09-01. Every other setting and seed matches job 11903182, so the
+truth triples are bit-identical and the two compare directly. Output →
+`results/analysis/coverage_ensemble_lmax64_prior_cl4_properprior_longtraj/`.
+
+Tasks 0–6 RUNNING (only 7 of 8 dine2 nodes were free); tasks 7–11 pending as a
+second wave. **Walltime is 13h, not 24h, deliberately**: a cluster-wide MAINT
+reservation (`root_321`) starts **2026-09-02 15:00** and covers all of dine2, so
+SLURM refuses to start anything overlapping it — the first submission (job
+11912084, 24h) sat at `ReqNodeNotAvail` and would never have run. The second
+wave will probably be cut by the reservation; that is recoverable, since
+`run_gibbs_chain` resumes automatically from an existing checkpoint.
+
+⚠ **Prior evidence on this knob is mixed and should temper the reading:**
+`achievements.md` records `phi_n_lfs` 80→240→480 as *non-monotonic* — 480 has
+previously regressed a bin that passed at 240. That finding predates the alm
+ordering fix and was scored on the lag-1 gate later shown to be a measurement
+artifact, so it is not a prediction, but a null result here should not be read
+as "trajectory length does nothing" without checking τ_int actually moved.
 
 Standing harvest checklist for the next ensemble: `.err` for tracebacks (SLURM
 `COMPLETED` is not sufficient), per-realization φ/truth power ratio O(1),
-re-derive `--thin` from each run's own τ_int, and **check that the Block 4 PIT's
-lag-1 control still fails** before quoting the aligned pass.
+re-derive `--thin` from each run's own τ_int, and **check the Block 4 PIT's
+verdict line reports a rejected control** before quoting the aligned pass
+(`--control_lags 1,10,50`; lag-1 alone is not enough).
 
 ---
 
@@ -124,6 +147,31 @@ field-rank conclusions stand, their spectrum values shift slightly at low ℓ.
 hardcoded the `2L+1` dof assumption after the samplers were corrected, so a
 harvest from that window compared corrected chains against a stale reference.
 Re-run both scripts rather than quoting an older printout.
+
+---
+
+## Differentiator figure — built, and currently a null
+
+`scripts/plot_joint_cl_clpp_posterior.py` measures the **within-posterior**
+correlation between `C_ℓ^TT` and `C_L^φφ` on job 11903182 (each chain
+standardised before pooling, so this is not the cosmic-variance scatter of the
+12 truths). Output: `results/analysis/figures/joint_cl_clpp_posterior.png`.
+
+**1 of 16 bin-pair cells exceeds its permutation null, against 0.8 expected by
+chance — no detection.** Strongest cell is `C_ℓ^TT [2,10) × C_L^φφ [10,30)` at
+r = +0.174 against a 95% null of 0.15, i.e. marginal.
+
+This is a statement about sample size, not about physics. At the 168 pooled
+draws that 12×600 sweeps supply after thinning by τ_int, the estimator throws
+|r| ~ 0.15 on *uncorrelated* data — the same size as the effect being looked
+for. Resolving |r| = 0.10 at 2σ needs ~2.4× this ensemble; |r| = 0.05 needs
+~9.5×. A small correlation is also the physically expected outcome: `C_ℓ^TT` is
+the *unlensed* spectrum and `C_L^φφ` depends on φ alone given φ, so the two
+couple only through the data via the lensing likelihood.
+
+Significance is against a within-chain permutation null (pairing destroyed,
+marginals kept), and the error bars are a **chain-level** bootstrap — only the
+12 chains are independent, not the 600 sweeps.
 
 ---
 
