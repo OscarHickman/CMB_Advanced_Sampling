@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=0
-#SBATCH --time=24:00:00
+#SBATCH --time=13:00:00
 #SBATCH -J cov_ens_l64_properprior_longtraj
 #SBATCH -o logs/cov_ens_l64_properprior_longtraj_%A_%a.out
 #SBATCH -e logs/cov_ens_l64_properprior_longtraj_%A_%a.err
@@ -56,6 +56,19 @@
 #     suspicion moves to Block 3 (phi | alm, C_l) itself. That is a
 #     different investigation, and this run is what licenses it.
 #   Either way the answer is informative; there is no null outcome.
+#
+# WALLTIME 13h, NOT 24h -- deliberate, 2026-09-01. A cluster-wide MAINT
+# reservation (root_321) starts 2026-09-02T15:00 and covers all of dine2
+# (gc[001-008]), so SLURM refuses to start any job whose walltime would run
+# into it: the first submission of this script (job 11912084, 24h) sat at
+# ReqNodeNotAvail and would not have started at all. 13h fits the ~19h window
+# and is ~1.35x the ~9.6h estimate. dine2 has 8 nodes and this array has 12
+# exclusive tasks, so tasks 8-11 form a second wave that starts only as the
+# first finishes and will likely be cut by the reservation -- that is expected
+# and recoverable: checkpoint_every=50 writes state and run_gibbs_chain resumes
+# automatically from an existing checkpoint, so resubmitting after maintenance
+# continues those chains rather than restarting them. Realizations are
+# independent, so an 8-chain aggregate is a valid (lower-N) result meanwhile.
 #
 # COST. The phi block dominates, so doubling its trajectory roughly doubles
 # the ~4.8h/realization to ~9.6h -- still comfortably inside the 24h
