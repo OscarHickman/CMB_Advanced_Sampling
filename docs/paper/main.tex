@@ -64,7 +64,7 @@ Commander-class samplers \citep{Commander} and their differentiable descendants
 \citep{Almanac,Flinch} infer maps and power spectra on the full sky but carry no
 lensing-potential block.
 We validate the sampler via simulation-based calibration (SBC) on lensed
-temperature maps at $\lmax = \placeholder{128}$, demonstrating frequentist
+temperature maps at $\lmax = \placeholder{64}$, demonstrating frequentist
 coverage of the joint posterior.
 As an exact reference standard, the sampler's posterior is the natural
 calibration target for fast, marginal, or learned CMB lensing methods.
@@ -126,7 +126,11 @@ An exact sampler is what learned posteriors get validated against
 The comparison is not speed but correctness.
 
 \textbf{Honest scope statement.}
-We demonstrate coverage at $\lmax \approx \placeholder{128}$.
+We demonstrate coverage at $\lmax = \placeholder{64}$. We quote the scale at
+which the calibration test actually passes rather than the largest scale at
+which a chain has been run: a converged result at a smaller scale is worth more
+than a partially-converged one at a larger scale, and the two should not be
+conflated.
 Scaling to $\lmax \sim 1000$ and polarisation (the science-driver configuration)
 is left to follow-up work.
 
@@ -172,17 +176,28 @@ The mass matrix is the posterior precision $1/\cl$; whitened coordinates are
 used throughout.
 
 % --- Block 3 ---
-\subsection{Block 3: $\phi \mid \alm, \cl$ (MCLMC)}
+\subsection{Block 3: $\phi \mid \alm, \cl$ (HMC)}
 \label{sec:block3}
 
-We sample the lensing potential $\phi$ given the current alm and $\cl$ via
-microcanonical Langevin Monte Carlo (MCLMC) \citep{Robnik:2022}, an unadjusted
-isokinetic-leapfrog integrator.
-MCLMC is chosen over standard HMC based on the evidence of
-\citet{Bayer:2023,Flinch}, who report one-to-three-order-of-magnitude efficiency
-gains over HMC at exactly this dimensionality regime on curved-sky CMB fields.
-The MCLMC integrator is hand-implemented in TensorFlow, reusing the same
-lensed log-probability target and its autodiff gradient unchanged.
+We sample the lensing potential $\phi$ given the current $\alm$ and $\cl$ with
+Hamiltonian Monte Carlo, using the differentiable lensed log-posterior of
+Sec.~\ref{sec:lensing} and its autodiff gradient, a prior-preconditioned
+diagonal mass matrix, and a long trajectory
+(\placeholder{$n_{\rm leapfrog} = 240$}) --- the trajectory length, rather than
+the step size, is what controls $\phi$ mixing in this target, at an acceptance
+rate of \placeholder{0.7\text{--}0.8}.
+
+We record the alternatives tried, since the literature would suggest otherwise.
+Microcanonical Langevin Monte Carlo \citep{Robnik:2022} is reported by
+\citet{Bayer:2023,Flinch} to give one-to-three-order-of-magnitude efficiency
+gains over HMC at this dimensionality on curved-sky CMB fields, and we
+implemented it against the same target. It wins on effective samples per
+wall-clock second at every multipole bin we probed, but fails our stationarity
+gate in both an untuned and a step-size-tuned configuration --- in one tuned run
+the lag-1 autocorrelation was \emph{worse} than untuned. The No-U-Turn Sampler
+and a Fisher-based mass matrix were likewise tested and rejected. We therefore
+use plain HMC, and note that an efficiency metric which ignores whether the
+chain is stationary will select the wrong sampler here.
 
 % --- Block 4 ---
 \subsection{Block 4: $\clpp \mid \phi$ (exact inverse-Gamma draw)}
@@ -453,6 +468,63 @@ Quantifies what joint sampling buys over a marginalised method.
 }
 
 
+\subsection{Comparison with the flat-sky joint sampler CMBLensing.jl}
+\label{sec:cmblensing}
+
+CMBLensing.jl \citep{CMBLensing,Millea:2020} is the closest existing method:
+the only other code that samples a joint $(\text{field}, \phi)$ posterior rather
+than marginalising or point-estimating. It is flat-sky, which is the gap this
+work closes, so the comparison is a positioning statement rather than a
+head-to-head benchmark, and we make it from that code's published
+configurations rather than by re-running it --- their paper reports the
+configuration table, autocorrelation lengths and wall-times needed for every
+axis compared here.
+
+\emph{What matches.} Our patch-scale validation used a polar-cap mask at
+$f_{\rm sky} = \placeholder{0.016}$, or $\approx \placeholder{660}\,\mathrm{deg}^2$,
+which is within a few percent of their largest published configuration
+(\textsc{big}, $\placeholder{650}\,\mathrm{deg}^2$) --- a coincidence of
+independent design choices rather than a matched setup, but it means the two
+codes are being compared at the same sky area. That configuration is described
+by its authors as near the practical ceiling for a flat-sky treatment, which is
+the point: the curved-sky formulation is not an alternative implementation of
+the same calculation, it is what removes that ceiling.
+
+\emph{What does not match, stated rather than smoothed over.} Their published
+examples are polarisation-only ($QU$) while ours is temperature-only; their
+Fourier mask reaches $\ell < \placeholder{3500}$ while our validated production
+scale is $\lmax = \placeholder{300}$, an order of magnitude in $\ell$; and the
+two codes' fiducial cosmologies differ in $\tau$, $\omega_b$ and $\omega_c$.
+Each of these affects lensing sensitivity and the degeneracy structure, so the
+comparison is one of \emph{methodology and mixing behaviour}, not of information
+content. We state it that way rather than inflating our configuration for the
+comparison.
+
+\emph{Architecture.} Both codes are Gibbs samplers with one non-Gaussian block
+on HMC, and the resemblance is close enough that one difference needs
+disambiguating. CMBLensing.jl draws its field block by conjugate gradient; we
+tested a conjugate-gradient shortcut for our $\alm$ block and rejected it as
+biased once a $\phi$ block was active. These are not the same thing. Their
+field-block conditional is genuinely Gaussian given fixed $\phi$, with $\phi$
+drawn in a separate HMC pass --- the same architecture we use --- whereas the
+route we rejected replaced the joint draw itself. A reader who sees ``they use
+CG, they rejected CG'' should read it as a difference in what was conditioned
+on, not a contradiction.
+
+\emph{Cost.} Their three configurations report
+\placeholder{19\text{--}50}\,h on a single GPU with per-parameter
+autocorrelation lengths of \placeholder{5\text{--}33}; ours runs at
+\placeholder{29\text{--}54}\,s per Gibbs sweep at $\lmax = \placeholder{300}$
+with $\phi$-block effective sample fractions of
+\placeholder{4.7\text{--}11.7\%}. We deliberately do not reduce these to a
+single cost-per-effective-sample ratio: the two are measured on different
+observables, at different $\ell$ ranges, on different hardware, and a single
+number would imply a precision the comparison does not have.
+
+\todo{If a referee asks for same-realization posterior overlays, that is the
+trigger to install and run CMBLensing.jl --- published numbers cannot provide
+them. Not before.}
+
 % ============================================================
 \section{Discussion and conclusion}
 \label{sec:discussion}
@@ -467,7 +539,7 @@ Commander-class samplers \citep{Commander,Almanac,Flinch} and QE-based methods
 (lensing-blind) or a lensing constraint (marginalised), never both together.
 
 \textbf{Honest scale statement.}
-The demonstration is at $\lmax \approx \placeholder{128}$, where chains
+The demonstration is at $\lmax = \placeholder{64}$, where chains
 equilibrate in $\sim \placeholder{XX}$h on a single GPU node.
 Scaling to $\lmax \sim 1000$ (the Planck / SO lensing science scale) is the
 principal avenue for follow-up work and is not addressed here.
