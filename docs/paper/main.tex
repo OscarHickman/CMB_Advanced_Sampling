@@ -347,14 +347,19 @@ Independently of the rank test, we verify Block 4 directly on the production
 chains: using each sweep's $(\phi, \clpp)$ pair, the probability integral
 transform $u = F_{\mathrm{InvGamma}(k_L/2 + a_0,\,(S_L(\phi)+b_{0,L})/2)}(\clpp)$
 is uniform (\placeholder{$\mathrm{KS}\ p = 0.42$}, \placeholder{$\bar u = 0.4999$},
-\placeholder{$N = 17856$}). We report the accompanying control rather than only
-the statistic: a deliberately lag-shifted pairing is rejected only when $\phi$
-mixes fast enough for $S_L(\phi_i) \ne S_L(\phi_{i+1})$ to bite
-(\placeholder{$p = 0.006$} in an earlier configuration), and in the
-proper-prior chains reported here it is \emph{not} rejected
-(\placeholder{$p = 0.18$}), so this particular pass carries no weight on its
-own. It is included for completeness, and the calibration evidence below rests
-on the independent generative ranks instead.
+\placeholder{$N = 17856$}). A probability-integral transform is only evidence
+if a deliberately misaligned pairing is rejected, and the lag must exceed the
+scale on which the conditioning variable actually moves: at lag~1 the chain's
+$S_L(\phi)$ autocorrelation is still \placeholder{0.92} and the control is
+\emph{not} rejected (\placeholder{$p = 0.18$}), whereas at lag
+\placeholder{10} and \placeholder{50} (autocorrelation \placeholder{0.52} and
+\placeholder{0.09}) it is rejected with \placeholder{$p < 10^{-16}$}. The
+aligned pass is therefore a genuine one: Block~4 draws from its stated
+conditional given $\phi$. We stress that this validates the \emph{draw}, not
+the derivation --- code and reference share the same expression, so this test
+passes for any shape parameter, and it is precisely how the incorrect $k_L$ of
+Sec.~\ref{sec:clpp-prior} survived an earlier check. The derivation is tested
+by the independent generative rank below.
 
 \subsubsection*{Field-level calibration}
 

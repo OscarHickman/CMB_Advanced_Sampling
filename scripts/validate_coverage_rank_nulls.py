@@ -156,13 +156,40 @@ def null_with_phi_trajectory(files, thin, n_rep, rng):
               f"{np.percentile(means, 2.5):9.4f} {np.percentile(means, 97.5):9.4f}")
 
 
-def block4_exactness(files, stride):
+def _block4_u(files, stride, lag):
+    """PIT values u = F(C_L | S_L(phi_{i-lag})) over every chain, lag-shifted."""
+    allu = []
+    for f in files:
+        d = np.load(f)
+        lmax = int(d["lmax"])
+        phi, lnC = d["phi_samples"], d["cl_phiphi_samples"]
+        if lag:
+            phi, lnC = phi[:-lag], lnC[lag:]
+        ells = np.arange(2, lmax)
+        alpha = alpha_of(d, "cl_phiphi")[ells]
+        _a0, b0 = prior_of(d, "cl_phiphi")
+        for i in range(0, len(phi), stride):
+            S = compute_sl_phi_np(phi[i], lmax)[ells]
+            allu.append(gammaincc(alpha, ((S + b0[ells]) / 2.0) / np.exp(lnC[i])))
+    return np.concatenate(allu)
+
+
+def block4_exactness(files, stride, control_lags):
     """Is Block 4 drawing from its own exact conditional given its own phi?
 
     The conditional is InvGamma(k_L/2 + a0, (S_L(phi) + b0_L)/2) with k_L = 2L
     the packed dof and (a0, b0) the run's prior -- flat (-1, 0) by default, or
     (nu/2, nu*C_L^fid) when --cl_phiphi_prior_nu was set. Both are read from
     the chain, so this check follows whatever configuration produced it.
+
+    The aligned statistic is only evidence if a deliberately MISALIGNED pairing
+    is rejected, and lag-1 alone is not enough: it detects the misalignment only
+    when phi actually moves between consecutive sweeps. On job 11903182 (Block 4
+    ON, proper prior) the lag-1 control passed at KS_p=0.183 because
+    S_L(phi_i) ~= S_L(phi_{i+1}) under the Block-4-ON funnel, which made the
+    aligned pass vacuous. Several lags are therefore run, spaced out to the
+    scale on which phi actually decorrelates, and the verdict below states
+    explicitly whether any control had power.
     """
     print("\n--- BLOCK 4 EXACTNESS on production chains ---")
     print("  u = CDF_InvGamma(k_L/2+a0, (S_L(phi_i)+b0_L)/2)[C_{L,i}]; "
@@ -170,25 +197,54 @@ def block4_exactness(files, stride):
     if not all("cl_phiphi_samples" in np.load(f).files for f in files):
         print("  (Block 4 disabled in these chains -- nothing to check; skipped)")
         return
-    for lag, label in ((0, "aligned"), (1, "lag-1 (control, should FAIL)")):
-        allu = []
+    lags = [(0, "aligned")] + [(k, f"lag-{k} (control, should FAIL)")
+                               for k in control_lags]
+    pvals = {}
+    for lag, label in lags:
+        u = _block4_u(files, stride, lag)
+        ks = stats.kstest(u, "uniform")
+        pvals[lag] = ks.pvalue
+        print(f"  {label:30s} N={u.size:6d}  mean_u={u.mean():.4f}  "
+              f"KS_D={ks.statistic:.4f}  KS_p={ks.pvalue:.3g}")
+
+    _report_phi_decorrelation(files, control_lags)
+
+    powered = [k for k in control_lags if pvals[k] < 1e-3]
+    if not powered:
+        print("  VERDICT: NO control was rejected at p<1e-3 -- phi barely moves "
+              "on any lag tried, so\n           the aligned result is VACUOUS. "
+              "Do not report it as an exactness pass;\n           raise "
+              "--control_lags, or report it only with a control that fails.")
+    else:
+        verdict = "PASS" if pvals[0] > 0.01 else "FAIL"
+        print(f"  VERDICT: controls at lag {powered} are rejected, so the test "
+              f"has power;\n           the aligned statistic is a genuine "
+              f"{verdict} (KS_p={pvals[0]:.3g}).")
+
+
+def _report_phi_decorrelation(files, control_lags):
+    """How far apart must two sweeps be before S_L(phi) actually differs?
+
+    This is what sets whether a lag-k control can have power at all: the PIT
+    can only notice a misalignment that changes its conditioning variable.
+    """
+    print("  phi decorrelation (mean over L of corr[S_L(phi_i), S_L(phi_{i+k})]):")
+    for k in control_lags:
+        cs = []
         for f in files:
             d = np.load(f)
             lmax = int(d["lmax"])
-            phi, lnC = d["phi_samples"], d["cl_phiphi_samples"]
-            if lag:
-                phi, lnC = phi[:-1], lnC[1:]
-            ells = np.arange(2, lmax)
-            alpha = alpha_of(d, "cl_phiphi")[ells]
-            _a0, b0 = prior_of(d, "cl_phiphi")
-            for i in range(0, len(phi), stride):
-                S = compute_sl_phi_np(phi[i], lmax)[ells]
-                beta = (S + b0[ells]) / 2.0
-                allu.append(gammaincc(alpha, beta / np.exp(lnC[i])))
-        u = np.concatenate(allu)
-        ks = stats.kstest(u, "uniform")
-        print(f"  {label:30s} N={u.size:6d}  mean_u={u.mean():.4f}  "
-              f"KS_D={ks.statistic:.4f}  KS_p={ks.pvalue:.3g}")
+            S = np.array([compute_sl_phi_np(p, lmax)[2:lmax]
+                          for p in d["phi_samples"]])
+            if len(S) <= k:
+                continue
+            a, b = S[:-k], S[k:]
+            a = a - a.mean(axis=0)
+            b = b - b.mean(axis=0)
+            denom = np.sqrt((a ** 2).sum(axis=0) * (b ** 2).sum(axis=0))
+            cs.append(np.mean((a * b).sum(axis=0) / np.where(denom > 0, denom, 1)))
+        if cs:
+            print(f"    lag {k:4d}: {np.mean(cs):+.3f}")
 
 
 def strict_clpp_sbc(files, thin):
@@ -266,6 +322,10 @@ def main():
     p.add_argument("--stride", type=int, default=25,
                    help="sweep subsampling for the Block 4 / phi-power checks")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--control_lags", type=str, default="1,10,50",
+                   help="comma-separated lags for the Block 4 PIT misalignment "
+                        "controls; at least one must be rejected or the aligned "
+                        "pass is vacuous")
     args = p.parse_args()
 
     files = load(args.indir)
@@ -277,7 +337,8 @@ def main():
     for tag in ("cl_TT", "cl_phiphi"):
         null_frozen(files, tag, n_eff, args.n_rep, rng)
     null_with_phi_trajectory(files, args.thin, args.n_rep, rng)
-    block4_exactness(files, args.stride)
+    block4_exactness(files, args.stride,
+                     [int(k) for k in args.control_lags.split(',') if k])
     strict_clpp_sbc(files, args.thin)
     phi_power_bias(files, args.stride)
 
