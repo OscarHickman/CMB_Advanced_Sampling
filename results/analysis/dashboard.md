@@ -1,5 +1,5 @@
 # Sampling & Validation Dashboard
-*Last updated: 2026-09-01*
+*Last updated: 2026-09-02*
 
 Live status of the production chains. Forward plan: `ROADMAP.md`. Closed-out
 results and the bug record: `achievements.md`.
@@ -56,9 +56,32 @@ wrong conditional — and that hypothesis is now better supported than it was,
 because the Block 4 PIT's pass is no longer vacuous (see the row above). Any
 figure sourced from this job must carry the caveat.
 
-**Under test: job 11912088** (below) doubles the φ trajectory to test exactly
-this. Read it as: rank → 0.5 *with* τ_int falling ⇒ funnel non-convergence;
-rank stuck ≈0.38 *while* τ_int halves ⇒ the problem is Block 3 itself.
+**HARVESTED 2026-09-02: job 11912088 (12/12 COMPLETED), doubled φ trajectory
+(`phi_n_lfs` 240 → 480) — intermediate result, neither predicted branch.**
+
+| Statistic | 240-traj (11903182) | 480-traj (11912088) |
+|---|---|---|
+| strict `C_L^φφ` SBC rank | 0.3802 (KS_p 0.0013) | **0.4196 (KS_p 0.00049)** |
+| worst rank bin | `[10,30)` = 0.292 | `[10,30)` = 0.262 (KS_p 0.0001) |
+| φ field rank | 0.4115 (KS_p 0.0264) | 0.4345 (KS_p 0.0741) |
+| Block 4 PIT (aligned) | 0.4999 (KS_p 0.42), genuine pass | 0.5025 (KS_p 0.342), genuine pass |
+| τ_int, per-bin max across chains | max 92.7 (bin unspecified) | `[2,10)` 100.2, `[10,30)` 48.3, `[30,60)` **107.8**, `[60,64)` 86.8 |
+
+The rank moved *toward* 0.5 (0.38 → 0.42) but the KS_p got *smaller*
+(0.0013 → 0.00049) — still a firm rejection of uniformity, not the "→0.5"
+branch the roadmap called a pass. τ_int fell in 3 of 4 bins (most sharply
+in the previously-worst `[60,64)` bin, 326 → 87) but **did not fall** in
+`[30,60)`, and Geyer's estimator truncated early (window exhausted before
+finding a non-positive pair) in all 48 chain×bin combinations, so all these
+τ_int numbers are lower bounds, not converged estimates. The failure is
+now concentrated almost entirely in one bin, `[10,30)` (KS_p 0.0001; the
+other three bins individually pass at KS_p 0.16–0.57) — a localized,
+ℓ-dependent residual is a different shape of evidence than "the whole
+spectrum is under-mixed," and doubling trajectory length again is not
+obviously the next lever. **Recommendation carried to `ROADMAP.md`: stop
+scanning `phi_n_lfs` and look at Block 3 (φ|alm,C_ℓ) mechanics specifically
+in the `[10,30)` range** — e.g. whether the HMC step size/mass matrix is
+comparably well-conditioned there vs the bins that do pass.
 
 ---
 
@@ -101,25 +124,9 @@ biased. `C_l^TT` needs no such correction because alm is pinned at cosine 0.9998
 
 ## In flight
 
-**Job 11912088** — Option 2 with a doubled φ trajectory (`phi_n_lfs` 240 → 480),
-launched 2026-09-01. Every other setting and seed matches job 11903182, so the
-truth triples are bit-identical and the two compare directly. Output →
-`results/analysis/coverage_ensemble_lmax64_prior_cl4_properprior_longtraj/`.
-
-Tasks 0–6 RUNNING (only 7 of 8 dine2 nodes were free); tasks 7–11 pending as a
-second wave. **Walltime is 13h, not 24h, deliberately**: a cluster-wide MAINT
-reservation (`root_321`) starts **2026-09-02 15:00** and covers all of dine2, so
-SLURM refuses to start anything overlapping it — the first submission (job
-11912084, 24h) sat at `ReqNodeNotAvail` and would never have run. The second
-wave will probably be cut by the reservation; that is recoverable, since
-`run_gibbs_chain` resumes automatically from an existing checkpoint.
-
-⚠ **Prior evidence on this knob is mixed and should temper the reading:**
-`achievements.md` records `phi_n_lfs` 80→240→480 as *non-monotonic* — 480 has
-previously regressed a bin that passed at 240. That finding predates the alm
-ordering fix and was scored on the lag-1 gate later shown to be a measurement
-artifact, so it is not a prediction, but a null result here should not be read
-as "trajectory length does nothing" without checking τ_int actually moved.
+Nothing in flight as of 2026-09-02. Job 11912088 harvested (see above); next
+step is analysis/investigation of Block 3 in the `[10,30)` bin, not a new
+launch, pending direction.
 
 Standing harvest checklist for the next ensemble: `.err` for tracebacks (SLURM
 `COMPLETED` is not sufficient), per-realization φ/truth power ratio O(1),
