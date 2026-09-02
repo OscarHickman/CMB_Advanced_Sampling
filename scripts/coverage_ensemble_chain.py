@@ -146,6 +146,15 @@ def main():
                         "correction) is the only setting that has ever cleared "
                         "the equilibration gate -- job 11781626, lmax=64, "
                         "Block 4 OFF (achievements.md).")
+    p.add_argument("--phi_block_n_probes", type=int, default=6,
+                   help="Only used with --phi_mass_matrix block: number of "
+                        "single-coordinate FD probes per (channel, m) block "
+                        "for the Nystrom curvature estimate. Default 6 matches "
+                        "the value 'block' has always been tested at (job "
+                        "11874976 NO-GO, achievements.md); raised here to test "
+                        "the untested rank-deficiency hypothesis -- the m=0..9 "
+                        "blocks that carry all L<10 coordinates are the "
+                        "largest and worst-approximated at a fixed rank.")
     p.add_argument("--cl_phiphi_prior_nu", type=float, default=None,
                    help="Put a PROPER conjugate InvGamma(nu/2, nu*C_L^fid/2) "
                         "prior on C_L^phiphi instead of the default flat "
@@ -301,6 +310,7 @@ def main():
         phi_hmc_step_size=args.phi_hmc_step_size,
         phi_n_lfs=args.phi_n_lfs,
         phi_mass_matrix=args.phi_mass_matrix,
+        phi_block_n_probes=args.phi_block_n_probes,
         sample_cl_phiphi=sample_cl_phiphi,
         cl_phiphi_prior_nu=args.cl_phiphi_prior_nu,
         seed=r,
